@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 )
 
@@ -26,7 +25,121 @@ import (
 // When the upstream already returns native tool_use blocks the converter is a
 // pure pass-through.
 
-var toolCallRe = regexp.MustCompile(`(?s)\[tool_call\]\s*(\{.*?\})\s*\[/tool_call\]`)
+// Opening / closing tags we recognise. We accept all common variants:
+//
+//	[tool_call]{...}[/tool_call]      ← Hermes / xynera most common
+//	<tool_call>{...}</tool_call>      ← Hermes XML
+//	[tool_call]{...}                  ← unclosed (truncated by max_tokens etc.)
+var (
+	toolCallOpeners = []string{"[tool_call]", "<tool_call>"}
+	toolCallClosers = []string{"[/tool_call]", "</tool_call>"}
+)
+
+// toolCallMatch is one parsed envelope inside a piece of text.
+type toolCallMatch struct {
+	start, end       int             // span in the original text (incl. open/close tags)
+	payload          json.RawMessage // the inner {...} JSON
+}
+
+// findToolCalls scans `text` for tool-call envelopes using balanced-JSON parsing
+// so the matcher works even when the upstream omits the closing tag (e.g. when
+// the response is truncated by max_tokens). Returns matches in order.
+func findToolCalls(text string) []toolCallMatch {
+	var out []toolCallMatch
+	i := 0
+	for i < len(text) {
+		// Find next opener
+		startTag := -1
+		startIdx := len(text)
+		var openerLen int
+		for _, op := range toolCallOpeners {
+			if k := strings.Index(text[i:], op); k >= 0 && i+k < startIdx {
+				startIdx = i + k
+				startTag = i + k
+				openerLen = len(op)
+			}
+		}
+		if startTag < 0 {
+			break
+		}
+		j := startTag + openerLen
+		// Skip whitespace before the JSON object
+		for j < len(text) && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n' || text[j] == '\r') {
+			j++
+		}
+		if j >= len(text) || text[j] != '{' {
+			i = startTag + 1
+			continue
+		}
+		// Walk balanced braces, respecting JSON strings/escapes.
+		depth, inStr, esc := 0, false, false
+		jsonStart := j
+		for j < len(text) {
+			ch := text[j]
+			if esc {
+				esc = false
+				j++
+				continue
+			}
+			if inStr {
+				switch ch {
+				case '\\':
+					esc = true
+				case '"':
+					inStr = false
+				}
+				j++
+				continue
+			}
+			switch ch {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					j++
+					goto balanced
+				}
+			case '"':
+				inStr = true
+			}
+			j++
+		}
+		// Ran off the end without balancing — give up on this opener.
+		i = startTag + 1
+		continue
+	balanced:
+		jsonEnd := j
+		// Optional whitespace + optional closing tag.
+		end := jsonEnd
+		for end < len(text) && (text[end] == ' ' || text[end] == '\t' || text[end] == '\n' || text[end] == '\r') {
+			end++
+		}
+		for _, cl := range toolCallClosers {
+			if strings.HasPrefix(text[end:], cl) {
+				end += len(cl)
+				break
+			}
+		}
+		out = append(out, toolCallMatch{
+			start:   startTag,
+			end:     end,
+			payload: json.RawMessage(text[jsonStart:jsonEnd]),
+		})
+		i = end
+	}
+	return out
+}
+
+// looksLikeToolCall returns true if `text` contains any opener tag — fast pre-check.
+func looksLikeToolCall(text string) bool {
+	for _, op := range toolCallOpeners {
+		if strings.Contains(text, op) {
+			return true
+		}
+	}
+	return false
+}
 
 // rawToolCall is the OpenAI-ish payload we expect inside [tool_call]...[/tool_call].
 type rawToolCall struct {
@@ -63,7 +176,7 @@ func newToolUseID() string {
 // ConvertResponse rewrites a non-streaming Anthropic /v1/messages response.
 // Returns the body unchanged if it doesn't contain text-tagged tool calls.
 func ConvertResponse(body []byte) []byte {
-	if !bytes.Contains(body, []byte("[tool_call]")) {
+	if !bytes.Contains(body, []byte("[tool_call]")) && !bytes.Contains(body, []byte("<tool_call>")) {
 		return body
 	}
 
@@ -99,12 +212,12 @@ func ConvertResponse(body []byte) []byte {
 			newBlocks = append(newBlocks, blockRaw)
 			continue
 		}
-		if !strings.Contains(text, "[tool_call]") {
+		if !looksLikeToolCall(text) {
 			newBlocks = append(newBlocks, blockRaw)
 			continue
 		}
 
-		matches := toolCallRe.FindAllStringSubmatchIndex(text, -1)
+		matches := findToolCalls(text)
 		if len(matches) == 0 {
 			newBlocks = append(newBlocks, blockRaw)
 			continue
@@ -112,15 +225,14 @@ func ConvertResponse(body []byte) []byte {
 
 		last := 0
 		for _, m := range matches {
-			if m[0] > last {
-				if pre := strings.TrimRight(text[last:m[0]], " \t\n"); pre != "" {
+			if m.start > last {
+				if pre := strings.TrimRight(text[last:m.start], " \t\n"); pre != "" {
 					tb, _ := json.Marshal(map[string]any{"type": "text", "text": pre})
 					newBlocks = append(newBlocks, tb)
 				}
 			}
 			var tc rawToolCall
-			tcBody := text[m[2]:m[3]]
-			if json.Unmarshal([]byte(tcBody), &tc) == nil && tc.Name != "" {
+			if json.Unmarshal(m.payload, &tc) == nil && tc.Name != "" {
 				tu, _ := json.Marshal(map[string]any{
 					"type":  "tool_use",
 					"id":    newToolUseID(),
@@ -130,7 +242,7 @@ func ConvertResponse(body []byte) []byte {
 				newBlocks = append(newBlocks, tu)
 				foundToolUse = true
 			}
-			last = m[1]
+			last = m.end
 		}
 		if last < len(text) {
 			if post := strings.TrimLeft(text[last:], " \t\n"); post != "" {
@@ -353,28 +465,29 @@ func (c *sseConv) handleMessageDelta(eventName string, ev map[string]json.RawMes
 
 func (c *sseConv) flushTextBlock() {
 	text := c.textBuf.String()
-	matches := toolCallRe.FindAllStringSubmatchIndex(text, -1)
-
+	if !looksLikeToolCall(text) {
+		c.emitTextSegment(text)
+		return
+	}
+	matches := findToolCalls(text)
 	if len(matches) == 0 {
-		// No envelope — emit as a single normal text block.
 		c.emitTextSegment(text)
 		return
 	}
 
 	last := 0
 	for _, m := range matches {
-		if m[0] > last {
-			if seg := strings.TrimRight(text[last:m[0]], " \t\n"); seg != "" {
+		if m.start > last {
+			if seg := strings.TrimRight(text[last:m.start], " \t\n"); seg != "" {
 				c.emitTextSegment(seg)
 			}
 		}
 		var tc rawToolCall
-		tcBody := text[m[2]:m[3]]
-		if json.Unmarshal([]byte(tcBody), &tc) == nil && tc.Name != "" {
+		if json.Unmarshal(m.payload, &tc) == nil && tc.Name != "" {
 			c.emitToolUseSegment(tc)
 			c.insertedToolUse = true
 		}
-		last = m[1]
+		last = m.end
 	}
 	if last < len(text) {
 		if seg := strings.TrimLeft(text[last:], " \t\n"); seg != "" {

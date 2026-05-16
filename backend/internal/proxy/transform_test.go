@@ -43,6 +43,48 @@ func TestConvertResponse_TextTaggedToolCall(t *testing.T) {
 	}
 }
 
+func TestConvertResponse_UnclosedToolCall(t *testing.T) {
+	// Upstream truncated/forgot the [/tool_call] closing tag.
+	in := []byte(`{"id":"m","content":[{"type":"text","text":"[tool_call]{\"name\":\"Read\",\"arguments\":{\"file_path\":\"D:/x.go\",\"offset\":70,\"limit\":80}}"}],"stop_reason":"end_turn"}`)
+	out := ConvertResponse(in)
+	var resp map[string]json.RawMessage
+	json.Unmarshal(out, &resp)
+	var stopReason string
+	json.Unmarshal(resp["stop_reason"], &stopReason)
+	if stopReason != "tool_use" {
+		t.Errorf("stop_reason = %q, want tool_use", stopReason)
+	}
+	var blocks []map[string]json.RawMessage
+	json.Unmarshal(resp["content"], &blocks)
+	var hasToolUse bool
+	for _, b := range blocks {
+		var typ string
+		json.Unmarshal(b["type"], &typ)
+		if typ == "tool_use" {
+			hasToolUse = true
+			var name string
+			json.Unmarshal(b["name"], &name)
+			if name != "Read" {
+				t.Errorf("name = %q, want Read", name)
+			}
+		}
+	}
+	if !hasToolUse {
+		t.Errorf("expected tool_use block to be synthesised, got: %s", out)
+	}
+	if bytes.Contains(out, []byte("[tool_call]")) {
+		t.Errorf("[tool_call] envelope leaked through: %s", out)
+	}
+}
+
+func TestConvertResponse_AngleTagToolCall(t *testing.T) {
+	in := []byte(`{"content":[{"type":"text","text":"<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"x\"}}</tool_call>"}]}`)
+	out := ConvertResponse(in)
+	if !bytes.Contains(out, []byte(`"type":"tool_use"`)) {
+		t.Errorf("angle-tag envelope not converted: %s", out)
+	}
+}
+
 func TestConvertResponse_NoToolCall(t *testing.T) {
 	in := []byte(`{"content":[{"type":"text","text":"hello"}]}`)
 	out := ConvertResponse(in)
