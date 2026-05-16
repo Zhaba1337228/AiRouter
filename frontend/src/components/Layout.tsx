@@ -8,26 +8,31 @@ export default function Layout() {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <span className="logo-icon">⚡</span>
+          <div className="logo-icon">⚡</div>
           <span>AiRouter</span>
         </div>
         <nav className="sidebar-nav">
-          <NavLink to="/" end className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
-            <span className="nav-icon">📊</span> Dashboard
+          <NavLink to="/" end className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">▣</span> Dashboard
           </NavLink>
-          <NavLink to="/keys" className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
-            <span className="nav-icon">🔑</span> API Keys
+          <NavLink to="/keys" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">⬡</span> API Keys
           </NavLink>
-          <NavLink to="/logs" className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
-            <span className="nav-icon">📋</span> Logs
+          <NavLink to="/logs" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">≡</span> Logs
           </NavLink>
-          <NavLink to="/chat" className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
-            <span className="nav-icon">💬</span> Test Chat
+          <NavLink to="/chat" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">◈</span> Test Chat
+          </NavLink>
+          <NavLink to="/setup" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">⚙</span> Setup
           </NavLink>
         </nav>
-        <button className="btn btn-ghost sidebar-logout" onClick={logout}>
-          Sign Out
-        </button>
+        <div className="sidebar-bottom">
+          <button className="btn btn-ghost btn-full" onClick={logout}>
+            Sign Out
+          </button>
+        </div>
       </aside>
       <main className="main-content">
         <Outlet />

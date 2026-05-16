@@ -1,0 +1,9 @@
+@echo off
+set ANTHROPIC_BASE_URL=
+set ANTHROPIC_API_KEY=
+set ANTHROPIC_AUTH_TOKEN=
+
+set "ANTHROPIC_BASE_URL=http://localhost:8200"
+set "ANTHROPIC_API_KEY=ar-720627f359fef0bafed28cefd1d20f3bad12cdd919966163"
+
+claude

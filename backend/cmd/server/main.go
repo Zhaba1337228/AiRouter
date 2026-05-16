@@ -63,18 +63,23 @@ func main() {
 	log.Println("redis connected")
 
 	// Repositories
-	keyRepo := repository.NewAPIKeyRepo(sqlDB)
-	logRepo := repository.NewLogRepo(sqlDB)
+	keyRepo      := repository.NewAPIKeyRepo(sqlDB)
+	logRepo      := repository.NewLogRepo(sqlDB)
+	settingsRepo := repository.NewSettingsRepo(sqlDB)
 
 	// Handlers
-	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo)
-	chatHandler := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey)
-	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo)
+	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo, settingsRepo, rdb)
+	chatHandler  := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey)
+	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo, settingsRepo, rdb)
 
 	// Router
 	r := chi.NewRouter()
 
-	r.Use(middleware.Logger)
+	// Plain-text request logger (no ANSI color codes)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
+		Logger:  log.New(os.Stdout, "", log.LstdFlags),
+		NoColor: true,
+	}))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
 	r.Use(cors.Handler(cors.Options{
@@ -107,11 +112,15 @@ func main() {
 
 		r.Get("/models", chatHandler.ListModels)
 		r.Post("/chat", chatHandler.Chat)
+
+		r.Get("/settings", adminHandler.GetSettings)
+		r.Put("/settings", adminHandler.PutSettings)
 	})
 
 	// Proxy routes (protected by user API key)
 	proxyRouter := chi.NewRouter()
 	proxyRouter.Use(mw.APIKeyAuth(keyRepo))
+	proxyRouter.Use(mw.BudgetLimit(keyRepo, rdb))
 	proxyRouter.Use(mw.RateLimit(rdb))
 	proxyRouter.HandleFunc("/*", proxyHandler.Proxy)
 
@@ -121,11 +130,12 @@ func main() {
 	// Start server
 	addr := ":" + cfg.Port
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 130 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      130 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

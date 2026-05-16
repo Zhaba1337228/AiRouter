@@ -22,6 +22,6 @@ WORKDIR /app
 COPY --from=builder /bin/server .
 COPY migrations/ ./migrations/
 
-EXPOSE 8080
+EXPOSE 8200
 
 ENTRYPOINT ["./server"]

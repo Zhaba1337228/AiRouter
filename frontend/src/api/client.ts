@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8200'
 
 export const client = axios.create({
   baseURL: API_URL,
@@ -28,7 +28,7 @@ client.interceptors.response.use(
 // API Keys
 export const apiKeys = {
   list: () => client.get('/admin/keys').then((r) => r.data),
-  create: (data: { name: string; note?: string; expires_at?: string }) =>
+  create: (data: { name: string; note?: string; expires_at?: string; budget_usd?: number }) =>
     client.post('/admin/keys', data).then((r) => r.data),
   delete: (id: string) => client.delete(`/admin/keys/${id}`).then((r) => r.data),
   toggle: (id: string, is_active: boolean) =>
@@ -45,4 +45,10 @@ export const stats = {
 export const logs = {
   list: (limit = 50, offset = 0) =>
     client.get(`/admin/logs?limit=${limit}&offset=${offset}`).then((r) => r.data),
+}
+
+// Settings
+export const settings = {
+  get: () => client.get('/admin/settings').then((r) => r.data as Record<string, string>),
+  put: (data: Record<string, string>) => client.put('/admin/settings', data).then((r) => r.data),
 }

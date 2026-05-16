@@ -2,15 +2,13 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json ./
+RUN npm install
 
 COPY . .
 
-ARG VITE_API_URL=http://localhost:8080
-ENV VITE_API_URL=$VITE_API_URL
-
-RUN npm run build
+ARG VITE_API_URL=http://localhost:8200
+RUN echo "VITE_API_URL=${VITE_API_URL}" > .env && npm run build
 
 # ---
 

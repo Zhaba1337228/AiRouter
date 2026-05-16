@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -13,64 +16,119 @@ import (
 	"github.com/airouter/backend/internal/middleware"
 	"github.com/airouter/backend/internal/models"
 	"github.com/airouter/backend/internal/repository"
+	"github.com/redis/go-redis/v9"
 )
+
+const settingsCacheKey = "settings:compression_mode"
+const settingsCacheTTL = 15 * time.Second
 
 type Handler struct {
 	upstreamBaseURL string
 	upstreamAPIKey  string
 	logRepo         *repository.LogRepo
+	settingsRepo    *repository.SettingsRepo
+	rdb             *redis.Client
 	httpClient      *http.Client
 }
 
-func NewHandler(upstreamBaseURL, upstreamAPIKey string, logRepo *repository.LogRepo) *Handler {
+func NewHandler(
+	upstreamBaseURL, upstreamAPIKey string,
+	logRepo *repository.LogRepo,
+	settingsRepo *repository.SettingsRepo,
+	rdb *redis.Client,
+) *Handler {
+	// Tuned transport: persistent connections, no local decompression,
+	// short dial/TLS timeouts so we fail-fast on network issues.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 60 * time.Second,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 0, // rely on request context timeout
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   256,
+		MaxConnsPerHost:       0, // unlimited
+		IdleConnTimeout:       90 * time.Second,
+		DisableCompression:    true, // upstream response piped as-is
+		ForceAttemptHTTP2:     true,
+	}
 	return &Handler{
 		upstreamBaseURL: strings.TrimRight(upstreamBaseURL, "/"),
 		upstreamAPIKey:  upstreamAPIKey,
 		logRepo:         logRepo,
+		settingsRepo:    settingsRepo,
+		rdb:             rdb,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:   120 * time.Second,
+			Transport: transport,
 		},
 	}
 }
 
-// Proxy forwards any request to upstream xynera.vip, replacing the Authorization header
+// compressionMode returns the current mode, reading from Redis cache first.
+func (h *Handler) compressionMode(ctx context.Context) CompressionMode {
+	if h.rdb != nil {
+		if v, err := h.rdb.Get(ctx, settingsCacheKey).Result(); err == nil {
+			return ParseMode(v)
+		}
+	}
+	if h.settingsRepo != nil {
+		if v, err := h.settingsRepo.Get(ctx, "compression_mode"); err == nil && v != "" {
+			if h.rdb != nil {
+				h.rdb.SetEx(ctx, settingsCacheKey, v, settingsCacheTTL)
+			}
+			return ParseMode(v)
+		}
+	}
+	return ModeStandard
+}
+
+// Proxy forwards any request to upstream, replacing auth headers with our upstream key.
+// Streaming responses (SSE) are piped in real-time while being buffered for logging.
 func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	// Read body
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10MB limit
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MB limit
 	if err != nil {
 		http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
-	// Build upstream URL
 	upstreamURL := h.upstreamBaseURL + r.URL.Path
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	// Create upstream request
+	// Rewrite body: route model + compress context
+	mode := h.compressionMode(r.Context())
+	body = rewriteRequest(body, mode)
+
 	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, `{"error":"failed to create upstream request"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Copy relevant headers
-	for _, hdr := range []string{"Content-Type", "Accept", "User-Agent", "Anthropic-Version", "Anthropic-Beta"} {
+	// Copy safe client headers
+	for _, hdr := range []string{
+		"Content-Type", "Accept", "User-Agent",
+		"Anthropic-Version", "Anthropic-Beta",
+	} {
 		if v := r.Header.Get(hdr); v != "" {
 			upReq.Header.Set(hdr, v)
 		}
 	}
 
-	// Use our upstream key
+	// Replace auth with our upstream key (both formats for compatibility)
 	upReq.Header.Set("Authorization", "Bearer "+h.upstreamAPIKey)
+	upReq.Header.Set("X-Api-Key", h.upstreamAPIKey)
 
-	// Forward the request
 	resp, err := h.httpClient.Do(upReq)
-
 	latencyMs := int(time.Since(startTime).Milliseconds())
 
 	if err != nil {
@@ -81,24 +139,106 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, `{"error":"failed to read upstream response"}`, http.StatusBadGateway)
-		return
-	}
-
 	// Copy response headers
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
 	}
+
+	// Detect streaming response
+	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
+		isStreamRequest(body)
+
+	if isSSE {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(resp.StatusCode)
+
+		flusher, canFlush := w.(http.Flusher)
+		var buf bytes.Buffer
+
+		chunk := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(chunk)
+			if n > 0 {
+				w.Write(chunk[:n])
+				buf.Write(chunk[:n])
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+
+		h.asyncLog(r, body, buf.Bytes(), resp.StatusCode, latencyMs, nil)
+		return
+	}
+
+	// Non-streaming: buffer and forward
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, `{"error":"failed to read upstream response"}`, http.StatusBadGateway)
+		return
+	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-
-	// Log async
 	h.asyncLog(r, body, respBody, resp.StatusCode, latencyMs, nil)
+}
+
+// rewriteRequest applies model routing then context compression.
+func rewriteRequest(body []byte, mode CompressionMode) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+
+	changed := false
+
+	// Route model
+	if modelRaw, ok := payload["model"]; ok {
+		var model string
+		if json.Unmarshal(modelRaw, &model) == nil {
+			routed := RouteModel(model)
+			if routed != model {
+				payload["model"], _ = json.Marshal(routed)
+				changed = true
+			}
+		}
+	}
+
+	if changed {
+		if b, err := json.Marshal(payload); err == nil {
+			body = b
+		}
+	}
+
+	// Compress context with active mode
+	return CompressBody(body, mode)
+}
+
+// isStreamRequest checks if the request body asks for streaming
+func isStreamRequest(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return false
+	}
+	raw, ok := m["stream"]
+	if !ok {
+		return false
+	}
+	var v bool
+	return json.Unmarshal(raw, &v) == nil && v
 }
 
 func (h *Handler) asyncLog(r *http.Request, reqBody, respBody []byte, statusCode, latencyMs int, errMsg *string) {
@@ -110,13 +250,11 @@ func (h *Handler) asyncLog(r *http.Request, reqBody, respBody []byte, statusCode
 			LatencyMs:  latencyMs,
 		}
 
-		// Extract api key info from context
 		if key, ok := r.Context().Value(middleware.APIKeyContextKey).(*models.APIKey); ok {
 			log.APIKeyID = &key.ID
 			log.APIKeyPrefix = &key.KeyPrefix
 		}
 
-		// Try to extract model and token usage from request/response
 		extractModel(reqBody, log)
 		if respBody != nil {
 			extractTokens(respBody, log)
@@ -132,7 +270,6 @@ func (h *Handler) asyncLog(r *http.Request, reqBody, respBody []byte, statusCode
 	}()
 }
 
-// extractModel tries to get the model name from OpenAI/Anthropic request body
 func extractModel(body []byte, log *models.RequestLog) {
 	if len(body) == 0 {
 		return
@@ -149,34 +286,156 @@ func extractModel(body []byte, log *models.RequestLog) {
 	}
 }
 
-// extractTokens tries to extract token usage from OpenAI/Anthropic response
+// extractTokens handles both JSON (non-streaming) and SSE (streaming) responses
+// for both OpenAI and Anthropic API formats.
 func extractTokens(body []byte, log *models.RequestLog) {
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if len(body) == 0 {
 		return
 	}
 
-	// OpenAI format: {"usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}}
-	if usageRaw, ok := payload["usage"]; ok {
-		var usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-			// Anthropic format
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+	// Try plain JSON first (non-streaming response)
+	if tryExtractJSON(body, log) {
+		return
+	}
+
+	// Fall back to SSE line-by-line scan
+	tryExtractSSE(body, log)
+}
+
+// tryExtractJSON handles non-streaming JSON responses.
+func tryExtractJSON(body []byte, log *models.RequestLog) bool {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+
+	usageRaw, ok := payload["usage"]
+	if !ok {
+		return false
+	}
+
+	var usage struct {
+		// OpenAI
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		// Anthropic
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(usageRaw, &usage); err != nil {
+		return false
+	}
+
+	if usage.TotalTokens > 0 {
+		log.PromptTokens = usage.PromptTokens
+		log.CompletionTokens = usage.CompletionTokens
+		log.TotalTokens = usage.TotalTokens
+	} else if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		log.PromptTokens = usage.InputTokens
+		log.CompletionTokens = usage.OutputTokens
+		log.TotalTokens = usage.InputTokens + usage.OutputTokens
+	} else {
+		return false
+	}
+
+	log.CostUSD = float64(log.TotalTokens) / 1_000_000 * models.TokenPricePerMillion
+	return true
+}
+
+// tryExtractSSE scans SSE lines for token usage.
+//
+// OpenAI streaming (stream_options.include_usage=true) — last data chunk before [DONE]:
+//
+//	data: {"choices":[],"usage":{"prompt_tokens":N,"completion_tokens":N,"total_tokens":N}}
+//
+// Anthropic streaming:
+//
+//	event: message_start
+//	data: {"type":"message_start","message":{"usage":{"input_tokens":N,"output_tokens":0}}}
+//	event: message_delta
+//	data: {"type":"message_delta","usage":{"output_tokens":N}}
+func tryExtractSSE(body []byte, log *models.RequestLog) {
+	var (
+		promptTokens     int
+		completionTokens int
+		totalTokens      int
+	)
+
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
 		}
-		if err := json.Unmarshal(usageRaw, &usage); err == nil {
-			if usage.TotalTokens > 0 {
-				log.PromptTokens = usage.PromptTokens
-				log.CompletionTokens = usage.CompletionTokens
-				log.TotalTokens = usage.TotalTokens
-			} else if usage.InputTokens > 0 || usage.OutputTokens > 0 {
-				// Anthropic SDK format
-				log.PromptTokens = usage.InputTokens
-				log.CompletionTokens = usage.OutputTokens
-				log.TotalTokens = usage.InputTokens + usage.OutputTokens
+		data := strings.TrimSpace(line[5:])
+		if data == "[DONE]" || data == "" {
+			continue
+		}
+
+		var chunk map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		// ── OpenAI: top-level "usage" field ──────────────────────────
+		if usageRaw, ok := chunk["usage"]; ok && usageRaw != nil && string(usageRaw) != "null" {
+			var u struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+				// Anthropic message_delta carries output_tokens here too
+				OutputTokens int `json:"output_tokens"`
+				InputTokens  int `json:"input_tokens"`
+			}
+			if err := json.Unmarshal(usageRaw, &u); err == nil {
+				if u.TotalTokens > 0 {
+					promptTokens = u.PromptTokens
+					completionTokens = u.CompletionTokens
+					totalTokens = u.TotalTokens
+				}
+				// Anthropic message_delta: {"type":"message_delta","usage":{"output_tokens":N}}
+				if u.OutputTokens > 0 {
+					completionTokens = u.OutputTokens
+				}
+				// Anthropic message_start nested usage
+				if u.InputTokens > 0 {
+					promptTokens = u.InputTokens
+				}
 			}
 		}
+
+		// ── Anthropic: {"type":"message_start","message":{"usage":{...}}} ──
+		if typeRaw, ok := chunk["type"]; ok {
+			var msgType string
+			if json.Unmarshal(typeRaw, &msgType) == nil && msgType == "message_start" {
+				if msgRaw, ok := chunk["message"]; ok {
+					var msg struct {
+						Usage struct {
+							InputTokens  int `json:"input_tokens"`
+							OutputTokens int `json:"output_tokens"`
+						} `json:"usage"`
+					}
+					if json.Unmarshal(msgRaw, &msg) == nil {
+						promptTokens = msg.Usage.InputTokens
+						if msg.Usage.OutputTokens > 0 {
+							completionTokens = msg.Usage.OutputTokens
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if totalTokens > 0 {
+		log.PromptTokens = promptTokens
+		log.CompletionTokens = completionTokens
+		log.TotalTokens = totalTokens
+		log.CostUSD = float64(log.TotalTokens) / 1_000_000 * models.TokenPricePerMillion
+	} else if promptTokens > 0 || completionTokens > 0 {
+		log.PromptTokens = promptTokens
+		log.CompletionTokens = completionTokens
+		log.TotalTokens = promptTokens + completionTokens
+		log.CostUSD = float64(log.TotalTokens) / 1_000_000 * models.TokenPricePerMillion
 	}
 }

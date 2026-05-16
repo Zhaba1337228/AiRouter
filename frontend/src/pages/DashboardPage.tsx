@@ -17,11 +17,15 @@ export default function DashboardPage() {
     refetchInterval: 60000,
   })
 
+  const totalCost = summary?.total_cost_usd ?? 0
+  const costDisplay = totalCost === 0 ? '—' : '$' + Number(totalCost).toFixed(4)
+
   const cards = [
     { label: 'Total Requests', value: summary?.total_requests ?? '—', color: '#6366f1' },
     { label: 'Success', value: summary?.success_requests ?? '—', color: '#22c55e' },
     { label: 'Errors', value: summary?.error_requests ?? '—', color: '#ef4444' },
     { label: 'Total Tokens', value: summary?.total_tokens ? Number(summary.total_tokens).toLocaleString() : '—', color: '#f59e0b' },
+    { label: 'Total Cost', value: costDisplay, color: '#10b981' },
     { label: 'Avg Latency', value: summary?.avg_latency_ms ? `${Math.round(summary.avg_latency_ms)}ms` : '—', color: '#8b5cf6' },
     { label: 'Active Keys', value: summary?.active_keys ?? '—', color: '#06b6d4' },
   ]
@@ -73,6 +77,29 @@ export default function DashboardPage() {
                 <YAxis tick={{ fill: '#9ca3af', fontSize: 12 }} />
                 <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #3d3d5c', color: '#e5e7eb' }} />
                 <Bar dataKey="tokens" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        <div className="chart-card">
+          <h3>Cost per Day, $ (14d)</h3>
+          {loadingDaily ? (
+            <div className="loading">Loading chart...</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={daily ?? []}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2d2d3a" />
+                <XAxis dataKey="date" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                <YAxis
+                  tick={{ fill: '#9ca3af', fontSize: 12 }}
+                  tickFormatter={(v) => `$${Number(v).toFixed(4)}`}
+                />
+                <Tooltip
+                  contentStyle={{ background: '#1a1a2e', border: '1px solid #3d3d5c', color: '#e5e7eb' }}
+                  formatter={(v) => [`$${Number(v).toFixed(6)}`, 'Cost']}
+                />
+                <Bar dataKey="cost_usd" fill="#10b981" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}

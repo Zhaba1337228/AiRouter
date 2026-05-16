@@ -38,6 +38,7 @@ type CreateKeyInput struct {
 	Name      string
 	Note      *string
 	ExpiresAt *time.Time
+	BudgetUSD float64
 }
 
 func (r *APIKeyRepo) Create(ctx context.Context, input CreateKeyInput) (key *models.APIKey, plaintext string, err error) {
@@ -48,10 +49,10 @@ func (r *APIKeyRepo) Create(ctx context.Context, input CreateKeyInput) (key *mod
 
 	key = &models.APIKey{}
 	err = r.db.QueryRowxContext(ctx, `
-		INSERT INTO api_keys (name, key_hash, key_prefix, note, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note
-	`, input.Name, hash, prefix, input.Note, input.ExpiresAt).StructScan(key)
+		INSERT INTO api_keys (name, key_hash, key_prefix, note, expires_at, budget_usd)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note, budget_usd
+	`, input.Name, hash, prefix, input.Note, input.ExpiresAt, input.BudgetUSD).StructScan(key)
 	if err != nil {
 		return nil, "", fmt.Errorf("insert api key: %w", err)
 	}
@@ -59,11 +60,24 @@ func (r *APIKeyRepo) Create(ctx context.Context, input CreateKeyInput) (key *mod
 	return key, plain, nil
 }
 
-func (r *APIKeyRepo) List(ctx context.Context) ([]*models.APIKey, error) {
-	var keys []*models.APIKey
+// List returns all keys with their total token usage and cost.
+func (r *APIKeyRepo) List(ctx context.Context) ([]*models.APIKeyWithUsage, error) {
+	keys := make([]*models.APIKeyWithUsage, 0)
 	err := r.db.SelectContext(ctx, &keys, `
-		SELECT id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note
-		FROM api_keys ORDER BY created_at DESC
+		SELECT
+			ak.id, ak.name, ak.key_hash, ak.key_prefix, ak.is_active,
+			ak.created_at, ak.last_used_at, ak.expires_at, ak.note, ak.budget_usd,
+			COALESCE(u.tokens_used, 0)    AS tokens_used,
+			COALESCE(u.total_cost_usd, 0) AS total_cost_usd
+		FROM api_keys ak
+		LEFT JOIN (
+			SELECT api_key_id,
+			       SUM(total_tokens) AS tokens_used,
+			       SUM(cost_usd)     AS total_cost_usd
+			FROM request_logs
+			GROUP BY api_key_id
+		) u ON u.api_key_id = ak.id
+		ORDER BY ak.created_at DESC
 	`)
 	return keys, err
 }
@@ -71,7 +85,7 @@ func (r *APIKeyRepo) List(ctx context.Context) ([]*models.APIKey, error) {
 func (r *APIKeyRepo) GetByID(ctx context.Context, id string) (*models.APIKey, error) {
 	key := &models.APIKey{}
 	err := r.db.GetContext(ctx, key, `
-		SELECT id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note
+		SELECT id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note, budget_usd
 		FROM api_keys WHERE id = $1
 	`, id)
 	return key, err
@@ -83,7 +97,7 @@ func (r *APIKeyRepo) ValidateKey(ctx context.Context, plaintext string) (*models
 
 	key := &models.APIKey{}
 	err := r.db.GetContext(ctx, key, `
-		SELECT id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note
+		SELECT id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, note, budget_usd
 		FROM api_keys
 		WHERE key_hash = $1
 		  AND is_active = TRUE
@@ -93,12 +107,22 @@ func (r *APIKeyRepo) ValidateKey(ctx context.Context, plaintext string) (*models
 		return nil, err
 	}
 
-	// update last_used_at async (best effort)
 	go func() {
 		_, _ = r.db.Exec(`UPDATE api_keys SET last_used_at = NOW() WHERE id = $1`, key.ID)
 	}()
 
 	return key, nil
+}
+
+// TotalCostSpent returns the total USD spent by a key across all requests.
+func (r *APIKeyRepo) TotalCostSpent(ctx context.Context, keyID string) (float64, error) {
+	var spent float64
+	err := r.db.QueryRowxContext(ctx, `
+		SELECT COALESCE(SUM(cost_usd), 0)
+		FROM request_logs
+		WHERE api_key_id = $1
+	`, keyID).Scan(&spent)
+	return spent, err
 }
 
 func (r *APIKeyRepo) SetActive(ctx context.Context, id string, active bool) error {

@@ -46,9 +46,9 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme-super-secret-token}
       UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://www.xynera.vip}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY}
-      PORT: 8080
+      PORT: 8200
     ports:
-      - "8080:8080"
+      - "8200:8200"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,7 +60,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8200}
     container_name: airouter_frontend
     restart: unless-stopped
     ports:

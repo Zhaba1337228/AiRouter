@@ -5,12 +5,13 @@ import (
 )
 
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	RedisURL        string
-	AdminToken      string
-	UpstreamBaseURL string
-	UpstreamAPIKey  string
+	Port             string
+	DatabaseURL      string
+	RedisURL         string
+	AdminToken       string
+	UpstreamBaseURL  string
+	UpstreamAPIKey   string
+	CompressionMode  string // off | lite | standard | aggressive | ultra | rtk | stacked
 }
 
 func Load() *Config {
@@ -21,6 +22,7 @@ func Load() *Config {
 		AdminToken:      getEnv("ADMIN_TOKEN", "changeme-super-secret-token"),
 		UpstreamBaseURL: getEnv("UPSTREAM_BASE_URL", "https://www.xynera.vip"),
 		UpstreamAPIKey:  getEnv("UPSTREAM_API_KEY", ""),
+		CompressionMode: getEnv("COMPRESSION_MODE", "standard"),
 	}
 }
 

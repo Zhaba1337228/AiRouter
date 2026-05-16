@@ -7,6 +7,7 @@ import DashboardPage from './pages/DashboardPage'
 import KeysPage from './pages/KeysPage'
 import LogsPage from './pages/LogsPage'
 import ChatPage from './pages/ChatPage'
+import SetupPage from './pages/SetupPage'
 
 const qc = new QueryClient()
 
@@ -32,6 +33,7 @@ function AppRoutes() {
         <Route path="keys" element={<KeysPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="chat" element={<ChatPage />} />
+        <Route path="setup" element={<SetupPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
