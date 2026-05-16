@@ -68,6 +68,7 @@ func main() {
 
 	// Handlers
 	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo)
+	chatHandler := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey)
 	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo)
 
 	// Router
@@ -103,6 +104,9 @@ func main() {
 		r.Get("/stats", adminHandler.Stats)
 		r.Get("/stats/daily", adminHandler.StatsByDay)
 		r.Get("/logs", adminHandler.Logs)
+
+		r.Get("/models", chatHandler.ListModels)
+		r.Post("/chat", chatHandler.Chat)
 	})
 
 	// Proxy routes (protected by user API key)

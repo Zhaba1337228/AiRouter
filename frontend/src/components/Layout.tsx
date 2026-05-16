@@ -21,6 +21,9 @@ export default function Layout() {
           <NavLink to="/logs" className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
             <span className="nav-icon">📋</span> Logs
           </NavLink>
+          <NavLink to="/chat" className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
+            <span className="nav-icon">💬</span> Test Chat
+          </NavLink>
         </nav>
         <button className="btn btn-ghost sidebar-logout" onClick={logout}>
           Sign Out
