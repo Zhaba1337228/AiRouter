@@ -207,6 +207,10 @@ func totalContentChars(msgs []rawMsg) int {
 	return n
 }
 
+// pruneMessages drops the oldest messages while preserving tool_use/tool_result
+// pairs. Each assistant message that contains tool_use blocks and its immediately
+// following user messages with tool_result blocks form an atomic group that must
+// never be split — otherwise the model receives orphaned tool_results and errors.
 func pruneMessages(msgs []rawMsg) []rawMsg {
 	const keep = 20
 	var sys, rest []rawMsg
@@ -220,18 +224,65 @@ func pruneMessages(msgs []rawMsg) []rawMsg {
 	if len(rest) <= keep {
 		return msgs
 	}
-	dropped := len(rest) - keep
+
+	// Build atomic groups: tool_use + its tool_result(s) must stay together.
+	type group struct{ start, end int } // [start, end) indices into rest
+	var groups []group
+	i := 0
+	for i < len(rest) {
+		start := i
+		// If this assistant message has tool_use, absorb following tool_result user msgs
+		if rest[i].Role == "assistant" && msgHasBlockType(rest[i], "tool_use") {
+			for i+1 < len(rest) && rest[i+1].Role == "user" && msgHasBlockType(rest[i+1], "tool_result") {
+				i++
+			}
+		}
+		groups = append(groups, group{start, i + 1})
+		i++
+	}
+
+	// Drop whole groups from the front until we are at/below keep
+	dropped := 0
+	for len(groups) > 0 && len(rest)-dropped > keep {
+		dropped += groups[0].end - groups[0].start
+		groups = groups[1:]
+	}
+
+	if dropped == 0 {
+		return msgs
+	}
+
 	notice, _ := json.Marshal(fmt.Sprintf(
 		"[%d older messages removed by AiRouter context compression. Continuing from recent context.]",
 		dropped,
 	))
 	ack, _ := json.Marshal("Understood.")
-	result := make([]rawMsg, 0, len(sys)+2+keep)
+	result := make([]rawMsg, 0, len(sys)+2+len(rest)-dropped)
 	result = append(result, sys...)
 	result = append(result, rawMsg{Role: "user", Content: notice, Extra: map[string]json.RawMessage{}})
 	result = append(result, rawMsg{Role: "assistant", Content: ack, Extra: map[string]json.RawMessage{}})
 	result = append(result, rest[dropped:]...)
 	return result
+}
+
+// msgHasBlockType returns true if the message content is an array that contains
+// at least one block with the given "type" field (e.g. "tool_use", "tool_result").
+func msgHasBlockType(m rawMsg, blockType string) bool {
+	var parts []json.RawMessage
+	if json.Unmarshal(m.Content, &parts) != nil {
+		return false
+	}
+	for _, part := range parts {
+		var block map[string]json.RawMessage
+		if json.Unmarshal(part, &block) != nil {
+			continue
+		}
+		var typ string
+		if json.Unmarshal(block["type"], &typ) == nil && typ == blockType {
+			return true
+		}
+	}
+	return false
 }
 
 // compressField compresses a top-level JSON string field.
@@ -278,20 +329,43 @@ func compressContent(raw json.RawMessage, mode CompressionMode, age int, role st
 			continue
 		}
 		var typ string
-		if json.Unmarshal(block["type"], &typ) != nil || typ != "text" {
+		if json.Unmarshal(block["type"], &typ) != nil {
 			continue
 		}
-		var text string
-		if json.Unmarshal(block["text"], &text) != nil {
-			continue
+
+		switch typ {
+		case "text":
+			var text string
+			if json.Unmarshal(block["text"], &text) != nil {
+				continue
+			}
+			compressed, ok := compressText(text, mode, age, role)
+			if !ok {
+				continue
+			}
+			block["text"], _ = json.Marshal(compressed)
+			parts[i], _ = json.Marshal(block)
+			changed = true
+
+		case "tool_result":
+			// Compress the text inside tool_result for aggressive/RTK modes.
+			// This keeps the block structure intact but shrinks large tool outputs.
+			if mode != ModeAggressive && mode != ModeUltra && mode != ModeRTK && mode != ModeStacked {
+				continue
+			}
+			var content string
+			if json.Unmarshal(block["content"], &content) != nil {
+				// content may itself be an array of blocks — skip for now
+				continue
+			}
+			compressed, ok := compressText(content, mode, age, "tool")
+			if !ok {
+				continue
+			}
+			block["content"], _ = json.Marshal(compressed)
+			parts[i], _ = json.Marshal(block)
+			changed = true
 		}
-		compressed, ok := compressText(text, mode, age, role)
-		if !ok {
-			continue
-		}
-		block["text"], _ = json.Marshal(compressed)
-		parts[i], _ = json.Marshal(block)
-		changed = true
 	}
 	if !changed {
 		return raw, false

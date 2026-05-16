@@ -114,13 +114,19 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy safe client headers
-	for _, hdr := range []string{
-		"Content-Type", "Accept", "User-Agent",
-		"Anthropic-Version", "Anthropic-Beta",
-	} {
-		if v := r.Header.Get(hdr); v != "" {
-			upReq.Header.Set(hdr, v)
+	// Forward all client headers except hop-by-hop and auth (which we replace).
+	// This preserves Anthropic-Beta (multi-value), MCP headers, extended-thinking
+	// flags, and any future SDK headers without needing an explicit whitelist.
+	for k, vv := range r.Header {
+		switch k {
+		case "Authorization", "X-Api-Key", "X-API-Key",
+			"Connection", "Keep-Alive", "Proxy-Authenticate",
+			"Proxy-Authorization", "Te", "Trailers",
+			"Transfer-Encoding", "Upgrade", "Content-Length":
+			continue
+		}
+		for _, v := range vv {
+			upReq.Header.Add(k, v)
 		}
 	}
 
