@@ -162,37 +162,29 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(resp.StatusCode)
 
-		flusher, canFlush := w.(http.Flusher)
-		var buf bytes.Buffer
-
-		chunk := make([]byte, 4096)
-		for {
-			n, readErr := resp.Body.Read(chunk)
-			if n > 0 {
-				w.Write(chunk[:n])
-				buf.Write(chunk[:n])
-				if canFlush {
-					flusher.Flush()
-				}
-			}
-			if readErr != nil {
-				break
-			}
-		}
-
-		h.asyncLog(r, body, buf.Bytes(), resp.StatusCode, latencyMs, nil)
+		flusher, _ := w.(http.Flusher)
+		// StreamConvertSSE pipes upstream → client, converting any
+		// [tool_call]...[/tool_call] envelopes into native Anthropic
+		// tool_use SSE events on the fly.
+		captured := StreamConvertSSE(w, flusher, resp.Body)
+		h.asyncLog(r, body, captured, resp.StatusCode, latencyMs, nil)
 		return
 	}
 
-	// Non-streaming: buffer and forward
+	// Non-streaming: buffer, convert text-tagged tool calls, forward.
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, `{"error":"failed to read upstream response"}`, http.StatusBadGateway)
 		return
 	}
+	converted := ConvertResponse(respBody)
+	if len(converted) != len(respBody) {
+		// Body was rewritten — fix Content-Length so chunked clients don't truncate.
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
+	}
 	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
-	h.asyncLog(r, body, respBody, resp.StatusCode, latencyMs, nil)
+	w.Write(converted)
+	h.asyncLog(r, body, converted, resp.StatusCode, latencyMs, nil)
 }
 
 // rewriteRequest applies model routing then context compression.
