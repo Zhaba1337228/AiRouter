@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,6 +363,11 @@ func tryExtractSSE(body []byte, log *models.RequestLog) {
 	)
 
 	scanner := bufio.NewScanner(bytes.NewReader(body))
+	// SSE `data:` lines can be very large (system prompt echo in message_start,
+	// big tool_result echo, etc.). The default 64 KB scanner buffer silently
+	// drops the rest of the stream when one line exceeds it — taking the
+	// usage event with it. Match the size we already use in StreamConvertSSE.
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -425,6 +432,26 @@ func tryExtractSSE(body []byte, log *models.RequestLog) {
 		}
 	}
 
+	// Regex fallback for cases where line-scanning missed the usage event:
+	// truncated streams, long single lines that broke even our enlarged buffer,
+	// non-LF-terminated chunked frames, etc. Picks the largest seen value of
+	// each — matches the "last write wins / cumulative output" semantics of
+	// the structured parser above.
+	if promptTokens == 0 {
+		if v := largestIntField(body, "input_tokens"); v > 0 {
+			promptTokens = v
+		} else if v := largestIntField(body, "prompt_tokens"); v > 0 {
+			promptTokens = v
+		}
+	}
+	if completionTokens == 0 {
+		if v := largestIntField(body, "output_tokens"); v > 0 {
+			completionTokens = v
+		} else if v := largestIntField(body, "completion_tokens"); v > 0 {
+			completionTokens = v
+		}
+	}
+
 	if totalTokens > 0 {
 		log.PromptTokens = promptTokens
 		log.CompletionTokens = completionTokens
@@ -436,4 +463,23 @@ func tryExtractSSE(body []byte, log *models.RequestLog) {
 		log.TotalTokens = promptTokens + completionTokens
 		log.CostUSD = float64(log.TotalTokens) / 1_000_000 * models.TokenPricePerMillion
 	}
+}
+
+// largestIntField finds occurrences of `"<field>": <int>` in `body` and returns
+// the largest one. Used as a structure-agnostic fallback for usage extraction
+// when SSE line-scanning fails (huge lines, half-frames, etc.).
+var usageFieldRe = regexp.MustCompile(`"([a-z_]+)"\s*:\s*(\d+)`)
+
+func largestIntField(body []byte, field string) int {
+	max := 0
+	for _, m := range usageFieldRe.FindAllSubmatch(body, -1) {
+		if string(m[1]) != field {
+			continue
+		}
+		n, err := strconv.Atoi(string(m[2]))
+		if err == nil && n > max {
+			max = n
+		}
+	}
+	return max
 }
