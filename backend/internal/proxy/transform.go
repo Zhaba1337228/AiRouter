@@ -20,8 +20,11 @@ import (
 //
 // Claude Code (and any Anthropic-native client) does not parse this — it just
 // renders the literal text. The functions below detect those envelopes in the
-// model output and rewrite them into proper Anthropic tool_use blocks /
-// streaming events so MCP and tool calling work transparently.
+// model output and rewrite them on the fly into proper Anthropic tool_use
+// blocks / streaming events so MCP and tool calling work transparently.
+//
+// When the upstream already returns native tool_use blocks the converter is a
+// pure pass-through.
 
 var toolCallRe = regexp.MustCompile(`(?s)\[tool_call\]\s*(\{.*?\})\s*\[/tool_call\]`)
 
@@ -40,7 +43,8 @@ func (t rawToolCall) input() json.RawMessage {
 	if len(t.Arguments) > 0 {
 		// arguments may itself be a JSON-encoded string of JSON ("{\"a\":1}")
 		var s string
-		if json.Unmarshal(t.Arguments, &s) == nil && (strings.HasPrefix(strings.TrimSpace(s), "{") || strings.HasPrefix(strings.TrimSpace(s), "[")) {
+		if json.Unmarshal(t.Arguments, &s) == nil &&
+			(strings.HasPrefix(strings.TrimSpace(s), "{") || strings.HasPrefix(strings.TrimSpace(s), "[")) {
 			return json.RawMessage(s)
 		}
 		return t.Arguments
@@ -115,8 +119,8 @@ func ConvertResponse(body []byte) []byte {
 				}
 			}
 			var tc rawToolCall
-			body := text[m[2]:m[3]]
-			if json.Unmarshal([]byte(body), &tc) == nil && tc.Name != "" {
+			tcBody := text[m[2]:m[3]]
+			if json.Unmarshal([]byte(tcBody), &tc) == nil && tc.Name != "" {
 				tu, _ := json.Marshal(map[string]any{
 					"type":  "tool_use",
 					"id":    newToolUseID(),
@@ -154,9 +158,9 @@ func ConvertResponse(body []byte) []byte {
 // [tool_call]...[/tool_call] sequences inside text_delta events into native
 // content_block_start/stop events with type=tool_use.
 //
-// Each upstream text content_block is fully buffered until its content_block_stop
-// arrives, then re-emitted as one or more (text + tool_use + text) blocks.
-// Non-text blocks (already-native tool_use, images, etc.) are forwarded as-is.
+// When the upstream already returns native tool_use blocks (no [tool_call]
+// envelopes appear), this is a pure pass-through — every event/data line is
+// forwarded byte-faithful, exactly once, with the same SSE framing.
 //
 // Returns the raw bytes that were captured for downstream logging.
 func StreamConvertSSE(w io.Writer, flusher http.Flusher, src io.Reader) []byte {
@@ -166,10 +170,8 @@ func StreamConvertSSE(w io.Writer, flusher http.Flusher, src io.Reader) []byte {
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		conv.handleLine(line)
+		conv.handleLine(scanner.Text())
 	}
-	conv.flush()
 	return captured.Bytes()
 }
 
@@ -178,63 +180,81 @@ type sseConv struct {
 	flusher  http.Flusher
 	captured *bytes.Buffer
 
-	// Per-block buffering state.
-	pendingEventName string                     // last "event: ..." line
-	curBlockData     []byte                     // raw data of last content_block_start (so we can replay/edit)
-	curBlockType     string                     // "text" / "tool_use" / "thinking" / ...
-	curUpstreamIdx   int                        // index from upstream
-	curOurIdx        int                        // index we emit
-	textBuf          strings.Builder            // buffered text deltas inside current text block
-	textBlockOpen    bool                       // we've already emitted content_block_start for the CURRENT segment
-	insertedToolUse  bool                       // any [tool_call] was converted in this stream
-	deltaSidecars    map[string]json.RawMessage // sidecar fields from a text_delta we want to keep on its replacement
+	// `event: ...` line not yet paired with its `data: ...` line.
+	pendingEventName string
+
+	// State for the current upstream content block.
+	curBlockType string // "text" / "tool_use" / "thinking" / ...
+	textBuf      strings.Builder
+
+	// Output index counter (we may insert extra blocks for split text).
+	curOurIdx int
+
+	// Set if we converted at least one [tool_call] envelope.
+	insertedToolUse bool
 }
 
-func (c *sseConv) write(s string) {
+// ── Low-level writes ─────────────────────────────────────────────────────────
+
+func (c *sseConv) writeRaw(s string) {
 	io.WriteString(c.w, s)
+	c.captured.WriteString(s)
 }
 
-func (c *sseConv) writeEvent(name string, data []byte) {
-	if name != "" {
-		c.write("event: " + name + "\n")
-	}
-	c.write("data: ")
-	c.w.Write(data)
-	c.write("\n\n")
+func (c *sseConv) flushOut() {
 	if c.flusher != nil {
 		c.flusher.Flush()
 	}
-	c.captured.WriteString("event: " + name + "\ndata: ")
-	c.captured.Write(data)
-	c.captured.WriteString("\n\n")
 }
 
-func (c *sseConv) writeRawLine(line string) {
-	c.write(line + "\n")
-	c.captured.WriteString(line + "\n")
+// passthrough writes a raw `event:` (optional) + `data: <payload>\n\n` event,
+// preserving the exact SSE framing the upstream sent us.
+func (c *sseConv) passthrough(eventName, data string) {
+	if eventName != "" {
+		c.writeRaw("event: " + eventName + "\n")
+	}
+	c.writeRaw("data: " + data + "\n\n")
+	c.flushOut()
 }
+
+// emit writes a JSON-encoded event we synthesised ourselves.
+func (c *sseConv) emit(eventName string, payload []byte) {
+	if eventName != "" {
+		c.writeRaw("event: " + eventName + "\n")
+	}
+	c.writeRaw("data: ")
+	c.w.Write(payload)
+	c.captured.Write(payload)
+	c.writeRaw("\n\n")
+	c.flushOut()
+}
+
+// ── Line dispatcher ──────────────────────────────────────────────────────────
 
 func (c *sseConv) handleLine(line string) {
 	if strings.HasPrefix(line, "event:") {
+		// Remember the event name; we will print it together with its `data:` line.
 		c.pendingEventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		c.writeRawLine(line)
 		return
 	}
 	if !strings.HasPrefix(line, "data:") {
-		// Blank line / comment / unknown — just forward
-		c.writeRawLine(line)
+		// Blank/comment line — these terminate events and are emitted by passthrough/emit
+		// already, so we drop standalone ones here.
 		return
 	}
 
 	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	eventName := c.pendingEventName
+	c.pendingEventName = ""
+
 	if data == "" || data == "[DONE]" {
-		c.writeRawLine(line)
+		c.passthrough(eventName, data)
 		return
 	}
 
 	var ev map[string]json.RawMessage
 	if json.Unmarshal([]byte(data), &ev) != nil {
-		c.writeRawLine(line)
+		c.passthrough(eventName, data)
 		return
 	}
 	var typ string
@@ -242,152 +262,149 @@ func (c *sseConv) handleLine(line string) {
 
 	switch typ {
 	case "content_block_start":
-		c.handleBlockStart(line, ev)
+		c.handleBlockStart(eventName, ev, data)
 	case "content_block_delta":
-		c.handleBlockDelta(line, ev)
+		c.handleBlockDelta(eventName, ev, data)
 	case "content_block_stop":
-		c.handleBlockStop(line, ev)
+		c.handleBlockStop(eventName, ev, data)
 	case "message_delta":
-		c.handleMessageDelta(line, ev)
+		c.handleMessageDelta(eventName, ev, data)
 	default:
-		c.writeRawLine(line)
+		c.passthrough(eventName, data)
 	}
 }
 
-func (c *sseConv) handleBlockStart(line string, ev map[string]json.RawMessage) {
+// ── Per-event handlers ───────────────────────────────────────────────────────
+
+func (c *sseConv) handleBlockStart(eventName string, ev map[string]json.RawMessage, data string) {
 	var info struct {
 		Index        int `json:"index"`
 		ContentBlock struct {
 			Type string `json:"type"`
 		} `json:"content_block"`
 	}
-	json.Unmarshal([]byte("{"+strings.SplitN(line, "{", 2)[1]), &info) // tolerate
+	json.Unmarshal([]byte(data), &info)
 
-	c.curUpstreamIdx = info.Index
 	c.curBlockType = info.ContentBlock.Type
 	c.textBuf.Reset()
-	c.textBlockOpen = false
 
 	if c.curBlockType == "text" {
-		// Defer emission — we may need to split this block.
-		// Store the raw start data to re-emit later (with our own index).
-		c.curBlockData = []byte(line)
+		// Defer — text blocks are buffered and re-emitted on content_block_stop
+		// (potentially split into text + tool_use + text segments).
 		return
 	}
 
-	// Non-text block: re-emit with our own index (which may be offset due to inserted tool_use blocks)
-	c.emitWithIdx("content_block_start", ev, c.curOurIdx)
+	// Non-text block (already-native tool_use, image, thinking, etc.):
+	// rewrite only the `index` to our own counter so it stays continuous
+	// after any inserted blocks. Re-emit with the original event name.
+	c.emitWithIdx(eventName, ev)
 }
 
-func (c *sseConv) handleBlockDelta(line string, ev map[string]json.RawMessage) {
+func (c *sseConv) handleBlockDelta(eventName string, ev map[string]json.RawMessage, data string) {
 	if c.curBlockType != "text" {
-		c.emitWithIdx("content_block_delta", ev, c.curOurIdx)
+		c.emitWithIdx(eventName, ev)
 		return
 	}
-	// Text delta: buffer the text part, save sidecar fields for fidelity.
-	var delta struct {
-		Delta map[string]json.RawMessage `json:"delta"`
-	}
-	if json.Unmarshal([]byte(line[strings.Index(line, "{"):]), &delta) == nil {
-		var text string
-		json.Unmarshal(delta.Delta["text"], &text)
-		c.textBuf.WriteString(text)
+	// Text delta: extract the text and buffer it for tool-call detection.
+	if dRaw, ok := ev["delta"]; ok {
+		var d struct {
+			Text string `json:"text"`
+		}
+		json.Unmarshal(dRaw, &d)
+		c.textBuf.WriteString(d.Text)
 	}
 }
 
-func (c *sseConv) handleBlockStop(line string, ev map[string]json.RawMessage) {
+func (c *sseConv) handleBlockStop(eventName string, ev map[string]json.RawMessage, data string) {
 	if c.curBlockType != "text" {
-		c.emitWithIdx("content_block_stop", ev, c.curOurIdx)
+		c.emitWithIdx(eventName, ev)
 		c.curOurIdx++
 		return
 	}
-	// Flush the buffered text block — possibly split by [tool_call] envelopes.
 	c.flushTextBlock()
 }
 
-func (c *sseConv) handleMessageDelta(line string, ev map[string]json.RawMessage) {
+func (c *sseConv) handleMessageDelta(eventName string, ev map[string]json.RawMessage, data string) {
 	if !c.insertedToolUse {
-		c.writeRawLine(line)
+		c.passthrough(eventName, data)
 		return
 	}
-	// Override stop_reason to tool_use so the SDK actually invokes the tool.
-	deltaRaw, ok := ev["delta"]
+	// We synthesised tool_use blocks; force stop_reason accordingly so the
+	// SDK actually invokes the tool.
+	dRaw, ok := ev["delta"]
 	if !ok {
-		c.writeRawLine(line)
+		c.passthrough(eventName, data)
 		return
 	}
-	var delta map[string]json.RawMessage
-	if json.Unmarshal(deltaRaw, &delta) != nil {
-		c.writeRawLine(line)
+	var d map[string]json.RawMessage
+	if json.Unmarshal(dRaw, &d) != nil {
+		c.passthrough(eventName, data)
 		return
 	}
-	delta["stop_reason"] = json.RawMessage(`"tool_use"`)
-	delta["stop_sequence"] = json.RawMessage(`null`)
-	newDelta, _ := json.Marshal(delta)
+	d["stop_reason"] = json.RawMessage(`"tool_use"`)
+	d["stop_sequence"] = json.RawMessage(`null`)
+	newDelta, _ := json.Marshal(d)
 	ev["delta"] = newDelta
 	out, _ := json.Marshal(ev)
-	c.writeEvent("message_delta", out)
+	c.emit(eventName, out)
 }
+
+// ── Buffered text block flush ────────────────────────────────────────────────
 
 func (c *sseConv) flushTextBlock() {
 	text := c.textBuf.String()
 	matches := toolCallRe.FindAllStringSubmatchIndex(text, -1)
 
 	if len(matches) == 0 {
-		// No tool calls: emit as single normal text block.
-		c.emitTextSegment(text, true)
+		// No envelope — emit as a single normal text block.
+		c.emitTextSegment(text)
 		return
 	}
 
 	last := 0
 	for _, m := range matches {
 		if m[0] > last {
-			seg := strings.TrimRight(text[last:m[0]], " \t\n")
-			if seg != "" {
-				c.emitTextSegment(seg, true)
+			if seg := strings.TrimRight(text[last:m[0]], " \t\n"); seg != "" {
+				c.emitTextSegment(seg)
 			}
 		}
-		// Tool call body
 		var tc rawToolCall
-		body := text[m[2]:m[3]]
-		if json.Unmarshal([]byte(body), &tc) == nil && tc.Name != "" {
+		tcBody := text[m[2]:m[3]]
+		if json.Unmarshal([]byte(tcBody), &tc) == nil && tc.Name != "" {
 			c.emitToolUseSegment(tc)
 			c.insertedToolUse = true
 		}
 		last = m[1]
 	}
 	if last < len(text) {
-		seg := strings.TrimLeft(text[last:], " \t\n")
-		if seg != "" {
-			c.emitTextSegment(seg, true)
+		if seg := strings.TrimLeft(text[last:], " \t\n"); seg != "" {
+			c.emitTextSegment(seg)
 		}
 	}
 }
 
-func (c *sseConv) emitTextSegment(text string, closeAfter bool) {
+func (c *sseConv) emitTextSegment(text string) {
 	idx := c.curOurIdx
 	startEv, _ := json.Marshal(map[string]any{
 		"type":          "content_block_start",
 		"index":         idx,
 		"content_block": map[string]any{"type": "text", "text": ""},
 	})
-	c.writeEvent("content_block_start", startEv)
+	c.emit("content_block_start", startEv)
 
 	deltaEv, _ := json.Marshal(map[string]any{
 		"type":  "content_block_delta",
 		"index": idx,
 		"delta": map[string]any{"type": "text_delta", "text": text},
 	})
-	c.writeEvent("content_block_delta", deltaEv)
+	c.emit("content_block_delta", deltaEv)
 
-	if closeAfter {
-		stopEv, _ := json.Marshal(map[string]any{
-			"type":  "content_block_stop",
-			"index": idx,
-		})
-		c.writeEvent("content_block_stop", stopEv)
-		c.curOurIdx++
-	}
+	stopEv, _ := json.Marshal(map[string]any{
+		"type":  "content_block_stop",
+		"index": idx,
+	})
+	c.emit("content_block_stop", stopEv)
+	c.curOurIdx++
 }
 
 func (c *sseConv) emitToolUseSegment(tc rawToolCall) {
@@ -404,35 +421,32 @@ func (c *sseConv) emitToolUseSegment(tc rawToolCall) {
 			"input": map[string]any{},
 		},
 	})
-	c.writeEvent("content_block_start", startEv)
+	c.emit("content_block_start", startEv)
 
-	// Send full input as a single input_json_delta.
 	input := tc.input()
 	if len(input) == 0 {
 		input = json.RawMessage(`{}`)
 	}
-	// input_json_delta expects partial_json as a string
 	partial, _ := json.Marshal(string(input))
 	deltaEv := []byte(fmt.Sprintf(
 		`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
 		idx, string(partial)))
-	c.writeEvent("content_block_delta", deltaEv)
+	c.emit("content_block_delta", deltaEv)
 
 	stopEv, _ := json.Marshal(map[string]any{
 		"type":  "content_block_stop",
 		"index": idx,
 	})
-	c.writeEvent("content_block_stop", stopEv)
+	c.emit("content_block_stop", stopEv)
 	c.curOurIdx++
 }
 
-func (c *sseConv) emitWithIdx(eventName string, ev map[string]json.RawMessage, idx int) {
-	idxJSON, _ := json.Marshal(idx)
+// emitWithIdx forwards a parsed event after rewriting its `index` field to our
+// own counter. Used for non-text blocks (tool_use, image, thinking) so their
+// indices stay continuous even after we insert extra synthesised blocks.
+func (c *sseConv) emitWithIdx(eventName string, ev map[string]json.RawMessage) {
+	idxJSON, _ := json.Marshal(c.curOurIdx)
 	ev["index"] = idxJSON
 	out, _ := json.Marshal(ev)
-	c.writeEvent(eventName, out)
-}
-
-func (c *sseConv) flush() {
-	// Nothing to do: every block is flushed at content_block_stop.
+	c.emit(eventName, out)
 }

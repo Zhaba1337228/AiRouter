@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -12,12 +13,20 @@ type contextKey string
 
 const APIKeyContextKey contextKey = "apiKey"
 
-// AdminAuth checks the Authorization: Bearer <ADMIN_TOKEN> header
+// AdminAuth checks the Authorization: Bearer <ADMIN_TOKEN> header.
+// Uses constant-time comparison to prevent timing attacks and rejects
+// empty/default tokens to avoid accidental open admin access.
 func AdminAuth(adminToken string) func(http.Handler) http.Handler {
+	unsafe := adminToken == "" || adminToken == "changeme-super-secret-token"
+	expected := []byte(adminToken)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if unsafe {
+				http.Error(w, `{"error":"admin disabled: ADMIN_TOKEN not configured"}`, http.StatusServiceUnavailable)
+				return
+			}
 			token := extractBearer(r)
-			if token != adminToken {
+			if subtle.ConstantTimeCompare([]byte(token), expected) != 1 {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

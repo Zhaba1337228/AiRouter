@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -11,7 +12,85 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultRPM = 60 // requests per minute per key
+const (
+	defaultRPM      = 60 // requests per minute per key
+	adminRPM        = 30 // requests per minute per IP for /admin
+	adminFailMax    = 10 // failed admin auths per 10 min per IP -> lockout
+	adminFailWindow = 10 * time.Minute
+)
+
+// clientIP extracts the request IP, taking RealIP middleware into account.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// AdminRateLimit limits requests to /admin per source IP and tracks failed
+// auth attempts to mitigate brute-force of ADMIN_TOKEN.
+func AdminRateLimit(rdb *redis.Client) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r)
+			ctx := context.Background()
+
+			lockKey := fmt.Sprintf("admin:lock:%s", ip)
+			if locked, _ := rdb.Exists(ctx, lockKey).Result(); locked > 0 {
+				http.Error(w, `{"error":"too many failed attempts, try again later"}`, http.StatusTooManyRequests)
+				return
+			}
+
+			rlKey := fmt.Sprintf("admin:rl:%s", ip)
+			count, err := rdb.Incr(ctx, rlKey).Result()
+			if err == nil && count == 1 {
+				rdb.Expire(ctx, rlKey, time.Minute)
+			}
+			if err == nil && count > adminRPM {
+				w.Header().Set("Retry-After", "60")
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
+
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(rec, r)
+
+			if rec.status == http.StatusUnauthorized {
+				failKey := fmt.Sprintf("admin:fail:%s", ip)
+				fails, _ := rdb.Incr(ctx, failKey).Result()
+				if fails == 1 {
+					rdb.Expire(ctx, failKey, adminFailWindow)
+				}
+				if fails >= adminFailMax {
+					rdb.Set(ctx, lockKey, "1", adminFailWindow)
+				}
+			}
+		})
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wrote {
+		s.status = code
+		s.wrote = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wrote {
+		s.status = http.StatusOK
+		s.wrote = true
+	}
+	return s.ResponseWriter.Write(b)
+}
 
 func RateLimit(rdb *redis.Client) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

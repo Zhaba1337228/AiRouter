@@ -51,6 +51,52 @@ func TestConvertResponse_NoToolCall(t *testing.T) {
 	}
 }
 
+func TestStreamConvertSSE_NativeToolUsePassthrough(t *testing.T) {
+	// Upstream already returns native tool_use blocks. The converter must be
+	// a faithful pass-through: each `event:` line should appear exactly once
+	// in the output, paired with its `data:` line.
+	src := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"m"}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_x","name":"Read","input":{}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"x.go\"}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var out bytes.Buffer
+	StreamConvertSSE(&out, nil, strings.NewReader(src))
+	got := out.String()
+
+	for _, name := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		"event: content_block_delta",
+		"event: content_block_stop",
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if c := strings.Count(got, name+"\n"); c != 1 {
+			t.Errorf("%q appears %d times in output, want 1:\n%s", name, c, got)
+		}
+	}
+	if !strings.Contains(got, `"type":"tool_use"`) {
+		t.Errorf("native tool_use block was not passed through:\n%s", got)
+	}
+}
+
 func TestStreamConvertSSE_TextTaggedToolCall(t *testing.T) {
 	src := strings.Join([]string{
 		`event: message_start`,
