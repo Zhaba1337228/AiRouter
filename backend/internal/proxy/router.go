@@ -1,9 +1,53 @@
 package proxy
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
-// defaultModel is the fallback when the requested model cannot be mapped.
-// openlimits.app default: latest Sonnet.
+// knownModels is the set of model IDs that openlimits.app actually supports.
+// Any model not in this set gets a 400 error instead of silent remapping.
+var knownModels = map[string]bool{
+	// openlimits.app supported models (verified)
+	"claude-sonnet-4-6":           true,
+	"claude-opus-4-6":             true,
+	"claude-haiku-4-5":            true,
+	"claude-sonnet-4-5":           true,
+	"claude-opus-4-5":             true,
+	"claude-opus-4-1":             true,
+	"claude-sonnet-4-0":           true,
+	"claude-opus-4-0":             true,
+	"claude-haiku-4-5-20251001":   true,
+	"claude-sonnet-4-5-20250929":  true,
+	"claude-opus-4-5-20251101":    true,
+	"claude-sonnet-4-20250514":    true,
+	"claude-opus-4-20250514":      true,
+	// Codex via /v1/responses
+	"gpt-5-codex":        true,
+	"gpt-5.1-codex":      true,
+	"gpt-5.2-codex":      true,
+	"gpt-5.3-codex":      true,
+	"gpt-5-codex-mini":   true,
+	"gpt-5.1-codex-mini": true,
+}
+
+// knownModelPrefixes matches model names by prefix for variants not listed above.
+var knownModelPrefixes = []string{
+	"claude-sonnet-4-6",
+	"claude-opus-4-6",
+	"claude-haiku-4-5",
+	"claude-sonnet-4-5",
+	"claude-opus-4-5",
+	"claude-opus-4-1",
+	"claude-sonnet-4-0",
+	"claude-opus-4-0",
+	"claude-",
+	"gpt-5-codex",
+}
+
+// defaultModel is the legacy fallback used only when the requested model
+// is known-Claude-but-not-in-table (e.g. unknown dated snapshot → latest in line).
+// It is NOT used for unknown/unrecognized models — those return an error.
 const defaultModel = "claude-sonnet-4-6"
 
 // modelRoutes maps incoming model names (lower-cased) to openlimits.app model IDs.
@@ -62,44 +106,63 @@ var modelRoutes = map[string]string{
 	"gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
 }
 
-// RouteModel maps any incoming model name to the best available upstream model.
-// Priority: exact match (case-insensitive) → fuzzy keyword → defaultModel.
-func RouteModel(model string) string {
+// RouteModel maps an incoming model name to an openlimits.app model ID.
+// Returns an error for unknown/unrecognized models (e.g. fake models,
+// deepseek-chat, gpt-4, etc.) instead of silently mapping them to Claude.
+func RouteModel(model string) (string, error) {
 	if model == "" {
-		return defaultModel
+		return "", fmt.Errorf("model is required")
 	}
 
 	lower := strings.ToLower(strings.TrimSpace(model))
 
-	// Exact match
+	// Explicit route in table
 	if mapped, ok := modelRoutes[lower]; ok {
-		return mapped
+		return mapped, nil
 	}
 
-	// Fuzzy: Claude family — map to latest openlimits.app model in each line
+	// Known Claude family — fuzzy map to latest in line
 	if strings.Contains(lower, "claude") {
 		switch {
 		case strings.Contains(lower, "opus"):
-			return "claude-opus-4-6"
+			return "claude-opus-4-6", nil
 		case strings.Contains(lower, "haiku"):
-			return "claude-haiku-4-5"
+			return "claude-haiku-4-5", nil
 		case strings.Contains(lower, "sonnet"):
 			if strings.Contains(lower, "4-5") {
-				return "claude-sonnet-4-5"
+				return "claude-sonnet-4-5", nil
 			}
-			return "claude-sonnet-4-6"
+			return "claude-sonnet-4-6", nil
 		default:
-			return "claude-sonnet-4-6"
+			return "claude-sonnet-4-6", nil
 		}
 	}
 
-	// Fuzzy: Codex family
+	// Known Codex family
 	if strings.Contains(lower, "codex") {
 		if strings.Contains(lower, "mini") {
-			return "gpt-5-codex-mini"
+			return "gpt-5-codex-mini", nil
 		}
-		return "gpt-5-codex"
+		return "gpt-5-codex", nil
 	}
 
-	return defaultModel
+	// Completely unknown model — reject instead of silent mapping to Claude
+	return "", fmt.Errorf("unsupported model: %q", model)
+}
+
+// isKnownModel returns true if the model is recognized as a valid Claude/Codex model.
+func isKnownModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if knownModels[lower] {
+		return true
+	}
+	for _, prefix := range knownModelPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -120,7 +120,8 @@ func main() {
 	// Proxy routes (protected by user API key)
 	proxyRouter := chi.NewRouter()
 	proxyRouter.Use(mw.APIKeyAuth(keyRepo))
-	proxyRouter.Use(mw.BudgetLimit(keyRepo, rdb))
+	proxyRouter.Use(mw.TokenLimit(keyRepo, rdb))
+	proxyRouter.Use(mw.RequestLimit(keyRepo, rdb))
 	proxyRouter.Use(mw.RateLimit(rdb))
 	proxyRouter.HandleFunc("/*", proxyHandler.Proxy)
 

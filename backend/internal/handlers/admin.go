@@ -35,10 +35,14 @@ func NewAdminHandler(
 // POST /admin/keys
 func (h *AdminHandler) CreateKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name       string  `json:"name"`
-		Note       *string `json:"note"`
-		ExpiresAt  *string `json:"expires_at"` // RFC3339 or null
-		BudgetUSD  float64 `json:"budget_usd"` // 0 = unlimited
+		Name         string   `json:"name"`
+		Note         *string  `json:"note"`
+		ExpiresAt    *string  `json:"expires_at"`    // RFC3339 or null
+		// TokenLimitM is the max total tokens in millions (0 = unlimited).
+		// e.g. 2.5 means 2 500 000 tokens.
+		TokenLimitM  float64  `json:"token_limit_m"`
+		// RequestLimit is the max total API requests (0 = unlimited).
+		RequestLimit int64    `json:"request_limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -50,9 +54,10 @@ func (h *AdminHandler) CreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := repository.CreateKeyInput{
-		Name:      req.Name,
-		Note:      req.Note,
-		BudgetUSD: req.BudgetUSD,
+		Name:         req.Name,
+		Note:         req.Note,
+		TokenLimit:   int64(req.TokenLimitM * 1_000_000),
+		RequestLimit: req.RequestLimit,
 	}
 	if req.ExpiresAt != nil {
 		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)

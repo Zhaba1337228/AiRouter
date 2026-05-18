@@ -28,8 +28,15 @@ client.interceptors.response.use(
 // API Keys
 export const apiKeys = {
   list: () => client.get('/admin/keys').then((r) => r.data),
-  create: (data: { name: string; note?: string; expires_at?: string; budget_usd?: number }) =>
-    client.post('/admin/keys', data).then((r) => r.data),
+  create: (data: {
+    name: string
+    note?: string
+    expires_at?: string
+    /** Token limit in millions (0 = unlimited). e.g. 2.5 = 2 500 000 tokens */
+    token_limit_m?: number
+    /** Max total requests (0 = unlimited) */
+    request_limit?: number
+  }) => client.post('/admin/keys', data).then((r) => r.data),
   delete: (id: string) => client.delete(`/admin/keys/${id}`).then((r) => r.data),
   toggle: (id: string, is_active: boolean) =>
     client.patch(`/admin/keys/${id}/toggle`, { is_active }).then((r) => r.data),

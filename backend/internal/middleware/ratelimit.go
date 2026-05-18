@@ -92,6 +92,7 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// RateLimit enforces a per-minute request cap per API key (sliding window via Redis).
 func RateLimit(rdb *redis.Client) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,35 +121,68 @@ func RateLimit(rdb *redis.Client) func(http.Handler) http.Handler {
 	}
 }
 
-// BudgetLimit blocks requests when the key has spent its entire USD budget.
-// budget_usd = 0 means unlimited.
-// Uses Redis to cache the spent amount for 60 seconds to reduce DB load.
-func BudgetLimit(keyRepo *repository.APIKeyRepo, rdb *redis.Client) func(http.Handler) http.Handler {
+// TokenLimit blocks requests when the key has consumed its total token budget.
+// token_limit = 0 means unlimited. Uses a 60-second Redis cache to reduce DB load.
+func TokenLimit(keyRepo *repository.APIKeyRepo, rdb *redis.Client) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key, ok := r.Context().Value(APIKeyContextKey).(*models.APIKey)
-			if !ok || key.BudgetUSD == 0 {
+			if !ok || key.TokenLimit == 0 {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			cacheKey := fmt.Sprintf("bl:%s", key.ID)
+			cacheKey := fmt.Sprintf("tl:%s", key.ID)
 			ctx := context.Background()
 
-			// Redis stores cost*1e8 as integer to avoid float issues
-			raw, err := rdb.Get(ctx, cacheKey).Float64()
+			used, err := rdb.Get(ctx, cacheKey).Int64()
 			if err != nil {
 				// cache miss — query DB
-				raw, err = keyRepo.TotalCostSpent(ctx, key.ID)
+				used, err = keyRepo.TotalTokensUsed(ctx, key.ID)
 				if err != nil {
 					next.ServeHTTP(w, r) // fail open
 					return
 				}
-				rdb.SetEx(ctx, cacheKey, raw, time.Minute)
+				rdb.SetEx(ctx, cacheKey, used, time.Minute)
 			}
 
-			if raw >= key.BudgetUSD {
-				http.Error(w, `{"error":"budget limit exceeded"}`, http.StatusTooManyRequests)
+			if used >= key.TokenLimit {
+				http.Error(w, `{"error":"token limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequestLimit blocks requests when the key has reached its total request count limit.
+// request_limit = 0 means unlimited. Uses a 60-second Redis cache to reduce DB load.
+func RequestLimit(keyRepo *repository.APIKeyRepo, rdb *redis.Client) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key, ok := r.Context().Value(APIKeyContextKey).(*models.APIKey)
+			if !ok || key.RequestLimit == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			cacheKey := fmt.Sprintf("rq:%s", key.ID)
+			ctx := context.Background()
+
+			count, err := rdb.Get(ctx, cacheKey).Int64()
+			if err != nil {
+				// cache miss — query DB
+				count, err = keyRepo.TotalRequestsCount(ctx, key.ID)
+				if err != nil {
+					next.ServeHTTP(w, r) // fail open
+					return
+				}
+				rdb.SetEx(ctx, cacheKey, count, time.Minute)
+			}
+
+			if count >= key.RequestLimit {
+				http.Error(w, `{"error":"request limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
 

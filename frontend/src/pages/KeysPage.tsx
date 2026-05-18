@@ -11,21 +11,39 @@ interface APIKey {
   last_used_at: string | null
   expires_at: string | null
   note: string | null
-  budget_usd: number
-  tokens_used: number
+  token_limit: number       // raw token count, 0 = unlimited
+  request_limit: number     // total requests, 0 = unlimited
+  tokens_used: number       // raw token count
+  requests_count: number
   total_cost_usd: number
 }
 
-function BudgetUsage({ spent, budget }: { spent: number; budget: number }) {
-  const fmt = (v: number) => v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`
-  if (budget === 0) {
+// Format raw token count as human-readable string in millions
+function fmtM(raw: number): string {
+  if (raw === 0) return '0'
+  const m = raw / 1_000_000
+  return m < 0.01 ? '<0.01M' : `${m % 1 === 0 ? m.toFixed(0) : m.toFixed(2)}M`
+}
+
+function LimitBar({
+  used,
+  limit,
+  fmtUsed,
+  fmtLimit,
+}: {
+  used: number
+  limit: number
+  fmtUsed: string
+  fmtLimit: string
+}) {
+  if (limit === 0) {
     return (
       <span style={{ color: 'var(--text3)', fontSize: 13 }}>
-        {spent > 0 ? fmt(spent) : '—'}
+        {used > 0 ? fmtUsed : '—'}
       </span>
     )
   }
-  const pct = Math.min((spent / budget) * 100, 100)
+  const pct = Math.min((used / limit) * 100, 100)
   const cls = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : ''
   return (
     <div className="progress-wrap">
@@ -33,7 +51,7 @@ function BudgetUsage({ spent, budget }: { spent: number; budget: number }) {
         <div className={`progress-bar-fill ${cls}`} style={{ width: `${pct}%` }} />
       </div>
       <span className={`progress-label ${cls}`}>
-        {fmt(spent)} / {fmt(budget)}
+        {fmtUsed} / {fmtLimit}
       </span>
     </div>
   )
@@ -43,7 +61,13 @@ export default function KeysPage() {
   const qc = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
   const [newSecret, setNewSecret] = useState<string | null>(null)
-  const [form, setForm] = useState({ name: '', note: '', expires_at: '', budget_usd: '' })
+  const [form, setForm] = useState({
+    name: '',
+    note: '',
+    expires_at: '',
+    token_limit_m: '',   // input in millions, e.g. "2.5"
+    request_limit: '',   // plain integer
+  })
   const [copied, setCopied] = useState(false)
 
   const { data: keys = [], isLoading } = useQuery<APIKey[]>({
@@ -57,7 +81,7 @@ export default function KeysPage() {
       qc.invalidateQueries({ queryKey: ['api-keys'] })
       setNewSecret(data.secret)
       setShowCreate(false)
-      setForm({ name: '', note: '', expires_at: '', budget_usd: '' })
+      setForm({ name: '', note: '', expires_at: '', token_limit_m: '', request_limit: '' })
     },
   })
 
@@ -74,12 +98,11 @@ export default function KeysPage() {
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
-    const payload: { name: string; note?: string; expires_at?: string; budget_usd?: number } = {
-      name: form.name,
-    }
+    const payload: Parameters<typeof apiKeys.create>[0] = { name: form.name }
     if (form.note) payload.note = form.note
     if (form.expires_at) payload.expires_at = new Date(form.expires_at).toISOString()
-    if (form.budget_usd) payload.budget_usd = parseFloat(form.budget_usd)
+    if (form.token_limit_m) payload.token_limit_m = parseFloat(form.token_limit_m)
+    if (form.request_limit) payload.request_limit = parseInt(form.request_limit, 10)
     createMutation.mutate(payload)
   }
 
@@ -176,16 +199,28 @@ export default function KeysPage() {
                 />
               </div>
               <div className="form-group">
-                <label>Budget, $</label>
+                <label>Token limit, M</label>
                 <input
                   type="number"
                   min="0"
-                  step="0.01"
-                  value={form.budget_usd}
-                  onChange={(e) => setForm({ ...form, budget_usd: e.target.value })}
-                  placeholder="e.g. 5.00 (0 = unlimited)"
+                  step="0.1"
+                  value={form.token_limit_m}
+                  onChange={(e) => setForm({ ...form, token_limit_m: e.target.value })}
+                  placeholder="e.g. 5 = 5M tokens (0 or empty = unlimited)"
                 />
-                <span className="form-hint">Max spend in USD. Key stops working when budget is hit.</span>
+                <span className="form-hint">Max total tokens in millions. Key stops when limit is hit.</span>
+              </div>
+              <div className="form-group">
+                <label>Request limit</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={form.request_limit}
+                  onChange={(e) => setForm({ ...form, request_limit: e.target.value })}
+                  placeholder="e.g. 1000 (0 or empty = unlimited)"
+                />
+                <span className="form-hint">Max total API requests. Key stops when limit is hit.</span>
               </div>
               <div className="form-group">
                 <label>Expires At</label>
@@ -218,7 +253,8 @@ export default function KeysPage() {
                 <th>Name</th>
                 <th>Key</th>
                 <th>Status</th>
-                <th>Spent / Budget</th>
+                <th>Tokens used</th>
+                <th>Requests</th>
                 <th>Last used</th>
                 <th>Expires</th>
                 <th>Actions</th>
@@ -227,7 +263,7 @@ export default function KeysPage() {
             <tbody>
               {keys.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="empty-row">No API keys yet. Create one!</td>
+                  <td colSpan={8} className="empty-row">No API keys yet. Create one!</td>
                 </tr>
               )}
               {keys.map((key) => (
@@ -242,7 +278,22 @@ export default function KeysPage() {
                       {key.is_active ? 'Active' : 'Disabled'}
                     </span>
                   </td>
-                  <td><BudgetUsage spent={key.total_cost_usd} budget={key.budget_usd} /></td>
+                  <td>
+                    <LimitBar
+                      used={key.tokens_used}
+                      limit={key.token_limit}
+                      fmtUsed={fmtM(key.tokens_used)}
+                      fmtLimit={fmtM(key.token_limit)}
+                    />
+                  </td>
+                  <td>
+                    <LimitBar
+                      used={key.requests_count}
+                      limit={key.request_limit}
+                      fmtUsed={key.requests_count.toLocaleString()}
+                      fmtLimit={key.request_limit.toLocaleString()}
+                    />
+                  </td>
                   <td style={{ color: 'var(--text3)', fontSize: 13 }}>
                     {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : '—'}
                   </td>

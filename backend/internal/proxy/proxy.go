@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,7 +118,11 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 
 	// Rewrite body: route model + compress context
 	mode := h.compressionMode(r.Context())
-	body = rewriteRequest(body, mode)
+	body, rewriteErr := rewriteRequest(body, mode)
+	if rewriteErr != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, rewriteErr.Error()), http.StatusBadRequest)
+		return
+	}
 
 	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
 	if err != nil {
@@ -163,14 +169,13 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Detect streaming response — only enter SSE path for successful responses.
-	// Error responses (4xx/5xx) are always handled as plain JSON so they get
-	// logged and forwarded with their body intact.
-	isSSE := resp.StatusCode < 300 && (
-		strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
-		isStreamRequest(body))
+	// Detect streaming response — only enter SSE path when client asked for streaming
+	// AND upstream actually returns SSE. This prevents ignoring stream:false.
+	// Error responses (4xx/5xx) are always plain JSON.
+	clientWantsStream := isStreamRequest(body)
+	upstreamSSE := resp.StatusCode < 300 && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
-	if isSSE {
+	if clientWantsStream && upstreamSSE {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -182,6 +187,27 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		// tool_use SSE events on the fly.
 		captured := StreamConvertSSE(w, flusher, resp.Body)
 		h.asyncLog(r, body, captured, resp.StatusCode, latencyMs, nil)
+		return
+	}
+
+	// Client asked for stream:false but upstream sent SSE — buffer, convert, return JSON.
+	if !clientWantsStream && upstreamSSE {
+		var captured bytes.Buffer
+		flusher := &dummyFlusher{}
+		StreamConvertSSE(&captured, flusher, resp.Body)
+
+		respBody := convertSSEToJSONResponse(captured.Bytes())
+		if resp.StatusCode >= 400 {
+			log.Printf("upstream error %d for %s %s — body: %s",
+				resp.StatusCode, r.Method, r.URL.Path, truncateLog(respBody, 512))
+		}
+		converted := ConvertResponse(respBody)
+		if len(converted) != len(respBody) {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(converted)
+		h.asyncLog(r, body, converted, resp.StatusCode, latencyMs, nil)
 		return
 	}
 
@@ -207,28 +233,39 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 
 // rewriteRequest applies model routing, strips unsupported params, then
 // applies context compression.
-func rewriteRequest(body []byte, mode CompressionMode) []byte {
+// Returns (rewrittenBody, error). Body is only returned if error is nil.
+func rewriteRequest(body []byte, mode CompressionMode) ([]byte, error) {
 	if len(body) == 0 {
-		return body
+		return body, nil
 	}
 
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
+		return body, nil
 	}
 
 	changed := false
 
-	// Route model
+	// Route model — reject unknown models instead of silent mapping
 	if modelRaw, ok := payload["model"]; ok {
 		var model string
-		if json.Unmarshal(modelRaw, &model) == nil {
-			routed := RouteModel(model)
+		if json.Unmarshal(modelRaw, &model) == nil && model != "" {
+			routed, err := RouteModel(model)
+			if err != nil {
+				return nil, err
+			}
 			if routed != model {
 				payload["model"], _ = json.Marshal(routed)
 				changed = true
 			}
 		}
+	}
+
+	// Strip thinking parameter — when enabled it consumes max_tokens budget
+	// and causes truncated responses with short token limits.
+	if _, ok := payload["thinking"]; ok {
+		delete(payload, "thinking")
+		changed = true
 	}
 
 	if changed {
@@ -238,7 +275,7 @@ func rewriteRequest(body []byte, mode CompressionMode) []byte {
 	}
 
 	// Compress context with active mode
-	return CompressBody(body, mode)
+	return CompressBody(body, mode), nil
 }
 
 // isStreamRequest checks if the request body asks for streaming
@@ -510,4 +547,197 @@ func largestIntField(body []byte, field string) int {
 		}
 	}
 	return max
+}
+
+// dummyFlusher is a no-op flusher used when buffering SSE responses for conversion.
+type dummyFlusher struct{}
+
+func (d *dummyFlusher) Flush() {}
+
+// convertSSEToJSONResponse converts a buffered SSE stream (already processed by
+// StreamConvertSSE to emit canonical Anthropic SSE) into a non-streaming
+// OpenAI /v1/chat/completions response by replaying the captured events.
+func convertSSEToJSONResponse(sse []byte) []byte {
+	type textPart struct {
+		Text string `json:"text,omitempty"`
+	}
+	type toolUsePart struct {
+		ID    string          `json:"id"`
+		Type  string          `json:"type"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
+	}
+	type message struct {
+		Role      string           `json:"role"`
+		Content   []json.RawMessage `json:"content"`
+		StopReason string          `json:"stop_reason,omitempty"`
+	}
+	type usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		InputTokens      int `json:"input_tokens,omitempty"`
+		OutputTokens     int `json:"output_tokens,omitempty"`
+	}
+
+	var parts []json.RawMessage
+	var stopReason string
+	var msgUsage usage
+
+	scanner := bufio.NewScanner(bytes.NewReader(sse))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(line[5:])
+		if data == "[DONE]" || data == "" {
+			continue
+		}
+		var ev map[string]json.RawMessage
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			continue
+		}
+		var typ string
+		json.Unmarshal(ev["type"], &typ)
+
+		switch typ {
+		case "content_block_start":
+			var info struct {
+				Index        int `json:"index"`
+				ContentBlock struct {
+					Type string `json:"type"`
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"content_block"`
+			}
+			json.Unmarshal([]byte(data), &info)
+			if info.ContentBlock.Type == "tool_use" {
+				tu, _ := json.Marshal(map[string]any{
+					"type": "tool_use",
+					"id":   info.ContentBlock.ID,
+					"name": info.ContentBlock.Name,
+				})
+				parts = append(parts, tu)
+			}
+
+		case "content_block_delta":
+			var info struct {
+				Index int `json:"index"`
+				Delta struct {
+					Type       string `json:"type"`
+					Text       string `json:"text"`
+					PartialJSON string `json:"partial_json"`
+				} `json:"delta"`
+			}
+			json.Unmarshal([]byte(data), &info)
+			if info.Delta.Type == "text_delta" && info.Delta.Text != "" {
+				parts = append(parts, marshalMap(map[string]any{"type": "text", "text": info.Delta.Text}))
+			}
+
+		case "message_delta":
+			var info struct {
+				Index int `json:"index"`
+				Delta struct {
+					StopReason  string `json:"stop_reason"`
+					StopSequence *string `json:"stop_sequence"`
+				} `json:"delta"`
+				Usage struct {
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			json.Unmarshal([]byte(data), &info)
+			if info.Delta.StopReason != "" {
+				stopReason = info.Delta.StopReason
+			}
+			if info.Usage.OutputTokens > 0 {
+				msgUsage.OutputTokens = info.Usage.OutputTokens
+			}
+
+		case "message_start":
+			var info struct {
+				Message struct {
+					Usage struct {
+						InputTokens  int `json:"input_tokens"`
+						OutputTokens int `json:"output_tokens"`
+					} `json:"usage"`
+				} `json:"message"`
+			}
+			json.Unmarshal([]byte(data), &info)
+			if info.Message.Usage.InputTokens > 0 {
+				msgUsage.InputTokens = info.Message.Usage.InputTokens
+			}
+			if info.Message.Usage.OutputTokens > 0 {
+				msgUsage.OutputTokens = info.Message.Usage.OutputTokens
+			}
+		}
+	}
+
+	if parts == nil {
+		parts = []json.RawMessage{}
+	}
+
+	// Build OpenAI-style chat.completions response
+	resp := map[string]any{
+		"id":      "chatcmpl-" + randomID(),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   "", // filled by caller if needed
+		"choices": []map[string]any{{
+			"index": 0,
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": assembleContent(parts),
+			},
+			"finish_reason": stopReason,
+		}},
+		"usage": map[string]int{
+			"prompt_tokens":     msgUsage.InputTokens,
+			"completion_tokens": msgUsage.OutputTokens,
+			"total_tokens":      msgUsage.InputTokens + msgUsage.OutputTokens,
+		},
+	}
+	out, _ := json.Marshal(resp)
+	return out
+}
+
+// assembleContent converts Anthropic content blocks back to a plain text string
+// for the OpenAI-compatible response format.
+func assembleContent(parts []json.RawMessage) string {
+	var b strings.Builder
+	for _, p := range parts {
+		var block map[string]json.RawMessage
+		if json.Unmarshal(p, &block) != nil {
+			continue
+		}
+		var typ string
+		json.Unmarshal(block["type"], &typ)
+		switch typ {
+		case "text":
+			if t, ok := block["text"]; ok {
+				var s string
+				json.Unmarshal(t, &s)
+				b.WriteString(s)
+			}
+		case "tool_use":
+			if name, ok := block["name"]; ok {
+				var n string
+				json.Unmarshal(name, &n)
+				b.WriteString("[tool_call]{\"name\":\"" + n + "\"}[/tool_call]")
+			}
+		}
+	}
+	return b.String()
+}
+
+func marshalMap(m map[string]any) json.RawMessage {
+	b, _ := json.Marshal(m)
+	return b
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
