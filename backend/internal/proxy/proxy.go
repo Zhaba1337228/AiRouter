@@ -27,11 +27,16 @@ import (
 const settingsCacheKey = "settings:compression_mode"
 const settingsCacheTTL = 15 * time.Second
 
+const providerCacheKeyBaseURL = "provider:default:base_url"
+const providerCacheKeyAPIKey = "provider:default:api_key"
+const providerCacheTTL = 15 * time.Second
+
 type Handler struct {
 	upstreamBaseURL string
 	upstreamAPIKey  string
 	logRepo         *repository.LogRepo
 	settingsRepo    *repository.SettingsRepo
+	providerRepo    *repository.ProviderRepo
 	rdb             *redis.Client
 	httpClient      *http.Client
 }
@@ -40,6 +45,7 @@ func NewHandler(
 	upstreamBaseURL, upstreamAPIKey string,
 	logRepo *repository.LogRepo,
 	settingsRepo *repository.SettingsRepo,
+	providerRepo *repository.ProviderRepo,
 	rdb *redis.Client,
 ) *Handler {
 	// Tuned transport: persistent connections, no local decompression,
@@ -66,12 +72,38 @@ func NewHandler(
 		upstreamAPIKey:  upstreamAPIKey,
 		logRepo:         logRepo,
 		settingsRepo:    settingsRepo,
+		providerRepo:    providerRepo,
 		rdb:             rdb,
 		httpClient: &http.Client{
 			Timeout:   120 * time.Second,
 			Transport: transport,
 		},
 	}
+}
+
+// activeProvider returns the base URL and API key to use for the current request.
+// Priority: default provider from DB (cached) → env fallback.
+func (h *Handler) activeProvider(ctx context.Context) (baseURL, apiKey string) {
+	// Try Redis cache first
+	if h.rdb != nil {
+		cachedURL, errU := h.rdb.Get(ctx, providerCacheKeyBaseURL).Result()
+		cachedKey, errK := h.rdb.Get(ctx, providerCacheKeyAPIKey).Result()
+		if errU == nil && errK == nil && cachedURL != "" {
+			return strings.TrimRight(cachedURL, "/"), cachedKey
+		}
+	}
+	// Try DB
+	if h.providerRepo != nil {
+		if p, err := h.providerRepo.GetDefault(ctx); err == nil {
+			if h.rdb != nil {
+				h.rdb.SetEx(ctx, providerCacheKeyBaseURL, p.BaseURL, providerCacheTTL)
+				h.rdb.SetEx(ctx, providerCacheKeyAPIKey, p.APIKey, providerCacheTTL)
+			}
+			return strings.TrimRight(p.BaseURL, "/"), p.APIKey
+		}
+	}
+	// Fallback to env/config values
+	return h.upstreamBaseURL, h.upstreamAPIKey
 }
 
 // compressionMode returns the current mode, reading from Redis cache first.
@@ -104,7 +136,8 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	upstreamURL := h.upstreamBaseURL + r.URL.Path
+	upstreamBaseURL, upstreamAPIKey := h.activeProvider(r.Context())
+	upstreamURL := upstreamBaseURL + r.URL.Path
 	if r.URL.RawQuery != "" {
 		// Strip Anthropic SDK-specific query params that upstreams don't support.
 		// e.g. ?beta=true is appended by Claude Code to signal beta feature use;
@@ -148,8 +181,8 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Replace auth with our upstream key (both formats for compatibility)
-	upReq.Header.Set("Authorization", "Bearer "+h.upstreamAPIKey)
-	upReq.Header.Set("X-Api-Key", h.upstreamAPIKey)
+	upReq.Header.Set("Authorization", "Bearer "+upstreamAPIKey)
+	upReq.Header.Set("X-Api-Key", upstreamAPIKey)
 
 	resp, err := h.httpClient.Do(upReq)
 	latencyMs := int(time.Since(startTime).Milliseconds())

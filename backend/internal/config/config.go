@@ -20,7 +20,7 @@ func Load() *Config {
 		DatabaseURL:     getEnv("DATABASE_URL", "postgres://airouter:secret@localhost:5432/airouter?sslmode=disable"),
 		RedisURL:        getEnv("REDIS_URL", "redis://localhost:6379"),
 		AdminToken:      getEnv("ADMIN_TOKEN", "changeme-super-secret-token"),
-		UpstreamBaseURL: getEnv("UPSTREAM_BASE_URL", "https://www.xynera.vip"),
+		UpstreamBaseURL: getEnv("UPSTREAM_BASE_URL", "https://api.ecomagent.in"),
 		UpstreamAPIKey:  getEnv("UPSTREAM_API_KEY", ""),
 		CompressionMode: getEnv("COMPRESSION_MODE", "standard"),
 	}

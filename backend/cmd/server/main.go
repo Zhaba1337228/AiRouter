@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -66,11 +67,12 @@ func main() {
 	keyRepo      := repository.NewAPIKeyRepo(sqlDB)
 	logRepo      := repository.NewLogRepo(sqlDB)
 	settingsRepo := repository.NewSettingsRepo(sqlDB)
+	providerRepo := repository.NewProviderRepo(sqlDB)
 
 	// Handlers
-	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo, settingsRepo, rdb)
+	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo, settingsRepo, providerRepo, rdb)
 	chatHandler  := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey)
-	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo, settingsRepo, rdb)
+	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo, settingsRepo, providerRepo, rdb)
 
 	// Router
 	r := chi.NewRouter()
@@ -97,12 +99,25 @@ func main() {
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
 
+	// GET /v1/models — returns supported model IDs (protected by API key)
+	listModelsHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		models := proxy.ListModels()
+		data, _ := json.Marshal(map[string]any{
+			"object": "list",
+			"data":   models,
+		})
+		w.Write(data)
+	}
+
 	// Admin routes (protected by admin token)
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(mw.AdminAuth(cfg.AdminToken))
 
 		r.Get("/keys", adminHandler.ListKeys)
 		r.Post("/keys", adminHandler.CreateKey)
+		r.Patch("/keys/{id}", adminHandler.UpdateKey)
 		r.Delete("/keys/{id}", adminHandler.DeleteKey)
 		r.Patch("/keys/{id}/toggle", adminHandler.ToggleKey)
 
@@ -115,6 +130,11 @@ func main() {
 
 		r.Get("/settings", adminHandler.GetSettings)
 		r.Put("/settings", adminHandler.PutSettings)
+
+		r.Get("/providers", adminHandler.ListProviders)
+		r.Post("/providers", adminHandler.CreateProvider)
+		r.Patch("/providers/{id}", adminHandler.UpdateProvider)
+		r.Delete("/providers/{id}", adminHandler.DeleteProvider)
 	})
 
 	// Proxy routes (protected by user API key)
@@ -122,7 +142,7 @@ func main() {
 	proxyRouter.Use(mw.APIKeyAuth(keyRepo))
 	proxyRouter.Use(mw.TokenLimit(keyRepo, rdb))
 	proxyRouter.Use(mw.RequestLimit(keyRepo, rdb))
-	proxyRouter.Use(mw.RateLimit(rdb))
+	proxyRouter.Get("/models", listModelsHandler)
 	proxyRouter.HandleFunc("/*", proxyHandler.Proxy)
 
 	r.Mount("/v1", proxyRouter)

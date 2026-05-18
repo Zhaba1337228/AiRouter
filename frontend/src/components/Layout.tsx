@@ -27,6 +27,9 @@ export default function Layout() {
           <NavLink to="/setup" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
             <span className="nav-icon">⚙</span> Setup
           </NavLink>
+          <NavLink to="/providers" className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">⬡</span> Providers
+          </NavLink>
         </nav>
         <div className="sidebar-bottom">
           <button className="btn btn-ghost btn-full" onClick={logout}>

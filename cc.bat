@@ -1,18 +1,4 @@
 @echo off
-REM ── Wipe stale registry env vars from old router/claudehub ──────────────────
-reg delete "HKCU\Environment" /v ANTHROPIC_BASE_URL   /f >nul 2>&1
-reg delete "HKCU\Environment" /v ANTHROPIC_API_KEY    /f >nul 2>&1
-reg delete "HKCU\Environment" /v ANTHROPIC_AUTH_TOKEN /f >nul 2>&1
-
-REM ── Clear session vars ───────────────────────────────────────────────────────
-set ANTHROPIC_BASE_URL=
-set ANTHROPIC_API_KEY=
-set ANTHROPIC_AUTH_TOKEN=
-
-REM ── Point to local AiRouter ──────────────────────────────────────────────────
-set "ANTHROPIC_BASE_URL=http://localhost:8200"
-set "ANTHROPIC_API_KEY=ar-720627f359fef0bafed28cefd1d20f3bad12cdd919966163"
-
-echo AiRouter: %ANTHROPIC_BASE_URL%
-echo.
+set "ANTHROPIC_BASE_URL=https://api.lmuai.com"
+set "ANTHROPIC_API_KEY=sk-6818a1bd319542dd7ff9aac481df57e5dbc4bccbd8a64076d952db3a0805136d"
 claude

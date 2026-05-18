@@ -58,11 +58,20 @@ type RequestLog struct {
 }
 
 type Stats struct {
-	TotalRequests   int64   `json:"total_requests"`
-	SuccessRequests int64   `json:"success_requests"`
-	ErrorRequests   int64   `json:"error_requests"`
-	TotalTokens     int64   `json:"total_tokens"`
-	TotalCostUSD    float64 `json:"total_cost_usd"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
-	ActiveKeys      int64   `json:"active_keys"`
+	TotalRequests     int64   `json:"total_requests"`
+	SuccessRequests   int64   `json:"success_requests"`
+	ErrorRequests     int64   `json:"error_requests"`
+	TotalTokens       int64   `json:"total_tokens"`
+	TotalCostUSD      float64 `json:"total_cost_usd"`
+	AvgLatencyMs      float64 `json:"avg_latency_ms"`
+	ActiveKeys        int64   `json:"active_keys"`
+	SuccessRate       float64 `json:"success_rate"`
+	ErrorRate         float64 `json:"error_rate"`
+	AvgTokensPerReq   float64 `json:"avg_tokens_per_request"`
+	TodayRequests     int64   `json:"today_requests"`
+	TodayTokens       int64   `json:"today_tokens"`
+	TodayCostUSD      float64 `json:"today_cost_usd"`
+	HourlyRequests    [24]int64   `json:"hourly_requests"`
+	HourlyTokens      [24]int64   `json:"hourly_tokens"`
+	HourlyCostUSD     [24]float64 `json:"hourly_cost_usd"`
 }

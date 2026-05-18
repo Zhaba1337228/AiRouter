@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(go build *)",
-      "Bash(go test *)"
+      "Bash(go test *)",
+      "WebFetch(domain:openlimits.app)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' https://openlimits.app/v1/models -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(curl -s https://openlimits.app/v1/models -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(curl -s https://openlimits.app/v1/chat/completions -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(curl -s https://openlimits.app/v1/messages -H 'Authorization: Bearer __CMDSUB_OUTPUT__')",
+      "Bash(docker-compose build *)",
+      "Bash(docker-compose up *)",
+      "Bash(docker compose restart *)",
+      "Bash(docker compose *)",
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:platform.openai.com)"
     ]
   }
 }

@@ -37,6 +37,14 @@ export const apiKeys = {
     /** Max total requests (0 = unlimited) */
     request_limit?: number
   }) => client.post('/admin/keys', data).then((r) => r.data),
+  update: (id: string, data: {
+    name?: string
+    note?: string
+    expires_at?: string
+    token_limit_m?: number
+    request_limit?: number
+    is_active?: boolean
+  }) => client.patch(`/admin/keys/${id}`, data).then((r) => r.data),
   delete: (id: string) => client.delete(`/admin/keys/${id}`).then((r) => r.data),
   toggle: (id: string, is_active: boolean) =>
     client.patch(`/admin/keys/${id}/toggle`, { is_active }).then((r) => r.data),
@@ -58,4 +66,37 @@ export const logs = {
 export const settings = {
   get: () => client.get('/admin/settings').then((r) => r.data as Record<string, string>),
   put: (data: Record<string, string>) => client.put('/admin/settings', data).then((r) => r.data),
+}
+
+// Providers
+export interface Provider {
+  id: string
+  name: string
+  base_url: string
+  api_key: string
+  is_active: boolean
+  is_default: boolean
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const providers = {
+  list: () => client.get('/admin/providers').then((r) => r.data as Provider[]),
+  create: (data: {
+    name: string
+    base_url: string
+    api_key: string
+    is_default?: boolean
+    note?: string
+  }) => client.post('/admin/providers', data).then((r) => r.data as Provider),
+  update: (id: string, data: {
+    name?: string
+    base_url?: string
+    api_key?: string
+    is_active?: boolean
+    is_default?: boolean
+    note?: string
+  }) => client.patch(`/admin/providers/${id}`, data).then((r) => r.data as Provider),
+  delete: (id: string) => client.delete(`/admin/providers/${id}`).then((r) => r.data),
 }

@@ -60,6 +60,8 @@ function LimitBar({
 export default function KeysPage() {
   const qc = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
+  const [showEdit, setShowEdit] = useState(false)
+  const [editKey, setEditKey] = useState<APIKey | null>(null)
   const [newSecret, setNewSecret] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
@@ -67,6 +69,14 @@ export default function KeysPage() {
     expires_at: '',
     token_limit_m: '',   // input in millions, e.g. "2.5"
     request_limit: '',   // plain integer
+  })
+  const [editForm, setEditForm] = useState({
+    name: '',
+    note: '',
+    expires_at: '',
+    token_limit_m: '',
+    request_limit: '',
+    is_active: true,
   })
   const [copied, setCopied] = useState(false)
 
@@ -95,6 +105,44 @@ export default function KeysPage() {
       apiKeys.toggle(id, is_active),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Parameters<typeof apiKeys.update>[1] }) =>
+      apiKeys.update(id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['api-keys'] })
+      setShowEdit(false)
+      setEditKey(null)
+    },
+  })
+
+  const openEdit = (key: APIKey) => {
+    setEditKey(key)
+    setEditForm({
+      name: key.name,
+      note: key.note ?? '',
+      expires_at: key.expires_at ? key.expires_at.slice(0, 16) : '',
+      token_limit_m: key.token_limit > 0 ? (key.token_limit / 1_000_000).toString() : '',
+      request_limit: key.request_limit > 0 ? key.request_limit.toString() : '',
+      is_active: key.is_active,
+    })
+    setShowEdit(true)
+  }
+
+  const handleEdit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editKey) return
+    const data: Parameters<typeof apiKeys.update>[1] = {}
+    if (editForm.name !== editKey.name) data.name = editForm.name
+    if (editForm.note !== (editKey.note ?? '')) data.note = editForm.note || undefined
+    if (editForm.expires_at !== (editKey.expires_at ? editKey.expires_at.slice(0, 16) : '')) {
+      data.expires_at = editForm.expires_at ? new Date(editForm.expires_at).toISOString() : ''
+    }
+    if (editForm.token_limit_m !== '') data.token_limit_m = parseFloat(editForm.token_limit_m)
+    if (editForm.request_limit !== '') data.request_limit = parseInt(editForm.request_limit, 10)
+    if (editForm.is_active !== editKey.is_active) data.is_active = editForm.is_active
+    updateMutation.mutate({ id: editKey.id, data })
+  }
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
@@ -243,6 +291,85 @@ export default function KeysPage() {
         </div>
       )}
 
+      {showEdit && editKey && (
+        <div className="modal-overlay" onClick={() => setShowEdit(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Edit API Key</h3>
+            <form onSubmit={handleEdit}>
+              <div className="form-group">
+                <label>Name *</label>
+                <input
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  placeholder="e.g. My App"
+                  required
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label>Note</label>
+                <input
+                  value={editForm.note}
+                  onChange={(e) => setEditForm({ ...editForm, note: e.target.value })}
+                  placeholder="Optional description"
+                />
+              </div>
+              <div className="form-group">
+                <label>Token limit, M</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={editForm.token_limit_m}
+                  onChange={(e) => setEditForm({ ...editForm, token_limit_m: e.target.value })}
+                  placeholder="e.g. 5 = 5M tokens (0 or empty = unlimited)"
+                />
+                <span className="form-hint">Max total tokens in millions. Key stops when limit is hit.</span>
+              </div>
+              <div className="form-group">
+                <label>Request limit</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={editForm.request_limit}
+                  onChange={(e) => setEditForm({ ...editForm, request_limit: e.target.value })}
+                  placeholder="e.g. 1000 (0 or empty = unlimited)"
+                />
+                <span className="form-hint">Max total API requests. Key stops when limit is hit.</span>
+              </div>
+              <div className="form-group">
+                <label>Expires At</label>
+                <input
+                  type="datetime-local"
+                  value={editForm.expires_at}
+                  onChange={(e) => setEditForm({ ...editForm, expires_at: e.target.value })}
+                />
+                <span className="form-hint">Leave empty to remove expiry (unlimited).</span>
+              </div>
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.is_active}
+                    onChange={(e) => setEditForm({ ...editForm, is_active: e.target.checked })}
+                  />
+                  Active
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => setShowEdit(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={updateMutation.isPending}>
+                  {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="loading">Loading keys...</div>
       ) : (
@@ -301,6 +428,12 @@ export default function KeysPage() {
                     {key.expires_at ? new Date(key.expires_at).toLocaleDateString() : '∞'}
                   </td>
                   <td className="actions-cell">
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      onClick={() => openEdit(key)}
+                    >
+                      Edit
+                    </button>
                     <button
                       className="btn btn-sm btn-ghost"
                       onClick={() => toggleMutation.mutate({ id: key.id, is_active: !key.is_active })}

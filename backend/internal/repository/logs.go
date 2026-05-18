@@ -39,6 +39,8 @@ func (r *LogRepo) List(ctx context.Context, limit, offset int) ([]*models.Reques
 
 func (r *LogRepo) Stats(ctx context.Context) (*models.Stats, error) {
 	stats := &models.Stats{}
+
+	// Main stats
 	err := r.db.QueryRowxContext(ctx, `
 		SELECT
 			COUNT(*) AS total_requests,
@@ -58,7 +60,60 @@ func (r *LogRepo) Stats(ctx context.Context) (*models.Stats, error) {
 		&stats.AvgLatencyMs,
 		&stats.ActiveKeys,
 	)
-	return stats, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Derived rates
+	if stats.TotalRequests > 0 {
+		stats.SuccessRate = float64(stats.SuccessRequests) / float64(stats.TotalRequests) * 100
+		stats.ErrorRate = float64(stats.ErrorRequests) / float64(stats.TotalRequests) * 100
+		stats.AvgTokensPerReq = float64(stats.TotalTokens) / float64(stats.TotalRequests)
+	}
+
+	// Today's stats
+	err = r.db.QueryRowxContext(ctx, `
+		SELECT
+			COUNT(*) AS today_requests,
+			COALESCE(SUM(total_tokens), 0) AS today_tokens,
+			COALESCE(SUM(cost_usd), 0) AS today_cost_usd
+		FROM request_logs
+		WHERE created_at >= CURRENT_DATE
+	`).Scan(&stats.TodayRequests, &stats.TodayTokens, &stats.TodayCostUSD)
+	if err != nil {
+		return nil, err
+	}
+
+	// Hourly breakdown (last 24h)
+	rows, err := r.db.QueryxContext(ctx, `
+		SELECT
+			EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') AS hour,
+			COUNT(*) AS requests,
+			COALESCE(SUM(total_tokens), 0) AS tokens,
+			COALESCE(SUM(cost_usd), 0) AS cost_usd
+		FROM request_logs
+		WHERE created_at >= NOW() - INTERVAL '24 hours'
+		GROUP BY EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')
+		ORDER BY hour
+	`)
+	if err != nil {
+		return stats, nil // non-fatal
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var hour, requests, tokens int64
+		var costUsd float64
+		if err := rows.Scan(&hour, &requests, &tokens, &costUsd); err == nil {
+			if hour >= 0 && hour < 24 {
+				stats.HourlyRequests[hour] = requests
+				stats.HourlyTokens[hour] = tokens
+				stats.HourlyCostUSD[hour] = costUsd
+			}
+		}
+	}
+
+	return stats, nil
 }
 
 func (r *LogRepo) StatsByDay(ctx context.Context, days int) ([]map[string]interface{}, error) {

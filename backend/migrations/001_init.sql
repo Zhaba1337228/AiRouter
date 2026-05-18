@@ -46,3 +46,18 @@ CREATE TABLE IF NOT EXISTS settings (
 INSERT INTO settings (key, value) VALUES
     ('compression_mode', 'standard')
 ON CONFLICT (key) DO NOTHING;
+
+-- Providers table (multiple upstream endpoints)
+CREATE TABLE IF NOT EXISTS providers (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    base_url    TEXT NOT NULL,
+    api_key     TEXT NOT NULL DEFAULT '',
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    is_default  BOOLEAN NOT NULL DEFAULT FALSE,
+    note        TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_providers_is_default ON providers(is_default) WHERE is_default = TRUE;

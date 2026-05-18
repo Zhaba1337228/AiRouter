@@ -8,6 +8,7 @@ import KeysPage from './pages/KeysPage'
 import LogsPage from './pages/LogsPage'
 import ChatPage from './pages/ChatPage'
 import SetupPage from './pages/SetupPage'
+import ProvidersPage from './pages/ProvidersPage'
 
 const qc = new QueryClient()
 
@@ -34,6 +35,7 @@ function AppRoutes() {
         <Route path="logs" element={<LogsPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="setup" element={<SetupPage />} />
+        <Route path="providers" element={<ProvidersPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/airouter/backend/internal/models"
@@ -152,5 +153,66 @@ func (r *APIKeyRepo) SetActive(ctx context.Context, id string, active bool) erro
 
 func (r *APIKeyRepo) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = $1`, id)
+	return err
+}
+
+// UpdateFields contains the editable fields for an API key.
+type UpdateKeyInput struct {
+	Name         *string
+	Note         *string
+	ExpiresAt    *time.Time
+	ClearExpiry  bool       // if true, sets expires_at to NULL
+	TokenLimit   *int64
+	RequestLimit *int64
+	IsActive     *bool
+}
+
+// Update modifies the editable fields of an existing API key.
+func (r *APIKeyRepo) Update(ctx context.Context, id string, input UpdateKeyInput) error {
+	// Build dynamic SET clause
+	var args []interface{}
+	argIdx := 1
+	setClauses := []string{}
+
+	if input.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *input.Name)
+		argIdx++
+	}
+	if input.Note != nil {
+		setClauses = append(setClauses, fmt.Sprintf("note = $%d", argIdx))
+		args = append(args, *input.Note)
+		argIdx++
+	}
+	if input.ClearExpiry {
+		setClauses = append(setClauses, fmt.Sprintf("expires_at = NULL"))
+	} else if input.ExpiresAt != nil {
+		setClauses = append(setClauses, fmt.Sprintf("expires_at = $%d", argIdx))
+		args = append(args, *input.ExpiresAt)
+		argIdx++
+	}
+	if input.TokenLimit != nil {
+		setClauses = append(setClauses, fmt.Sprintf("token_limit = $%d", argIdx))
+		args = append(args, *input.TokenLimit)
+		argIdx++
+	}
+	if input.RequestLimit != nil {
+		setClauses = append(setClauses, fmt.Sprintf("request_limit = $%d", argIdx))
+		args = append(args, *input.RequestLimit)
+		argIdx++
+	}
+	if input.IsActive != nil {
+		setClauses = append(setClauses, fmt.Sprintf("is_active = $%d", argIdx))
+		args = append(args, *input.IsActive)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		return nil // nothing to update
+	}
+
+	args = append(args, id)
+	query := fmt.Sprintf("UPDATE api_keys SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
+	_, err := r.db.ExecContext(ctx, query, args...)
 	return err
 }

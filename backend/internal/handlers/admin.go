@@ -16,6 +16,7 @@ type AdminHandler struct {
 	keyRepo      *repository.APIKeyRepo
 	logRepo      *repository.LogRepo
 	settingsRepo *repository.SettingsRepo
+	providerRepo *repository.ProviderRepo
 	rdb          interface{ Del(ctx context.Context, keys ...string) *redis.IntCmd }
 }
 
@@ -27,9 +28,10 @@ func NewAdminHandler(
 	keyRepo *repository.APIKeyRepo,
 	logRepo *repository.LogRepo,
 	settingsRepo *repository.SettingsRepo,
+	providerRepo *repository.ProviderRepo,
 	rdb redisDeleter,
 ) *AdminHandler {
-	return &AdminHandler{keyRepo: keyRepo, logRepo: logRepo, settingsRepo: settingsRepo, rdb: rdb}
+	return &AdminHandler{keyRepo: keyRepo, logRepo: logRepo, settingsRepo: settingsRepo, providerRepo: providerRepo, rdb: rdb}
 }
 
 // POST /admin/keys
@@ -117,6 +119,66 @@ func (h *AdminHandler) ToggleKey(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, http.StatusOK, map[string]bool{"is_active": req.IsActive})
 }
 
+// PATCH /admin/keys/{id}
+func (h *AdminHandler) UpdateKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Name          *string  `json:"name"`
+		Note          *string  `json:"note"`
+		ExpiresAt     *string  `json:"expires_at"` // RFC3339, empty string = clear
+		TokenLimitM   *float64 `json:"token_limit_m"`
+		RequestLimit *int64   `json:"request_limit"`
+		IsActive      *bool    `json:"is_active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	input := repository.UpdateKeyInput{}
+	if req.Name != nil {
+		input.Name = req.Name
+	}
+	if req.Note != nil {
+		input.Note = req.Note
+	}
+	if req.ExpiresAt != nil {
+		if *req.ExpiresAt == "" {
+			input.ClearExpiry = true
+		} else {
+			t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+			if err != nil {
+				jsonError(w, "invalid expires_at format, use RFC3339", http.StatusBadRequest)
+				return
+			}
+			input.ExpiresAt = &t
+		}
+	}
+	if req.TokenLimitM != nil {
+		limit := int64(*req.TokenLimitM * 1_000_000)
+		input.TokenLimit = &limit
+	}
+	if req.RequestLimit != nil {
+		input.RequestLimit = req.RequestLimit
+	}
+	if req.IsActive != nil {
+		input.IsActive = req.IsActive
+	}
+
+	if err := h.keyRepo.Update(r.Context(), id, input); err != nil {
+		jsonError(w, "failed to update key: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return updated key
+	key, err := h.keyRepo.GetByID(r.Context(), id)
+	if err != nil {
+		jsonError(w, "key updated but failed to fetch: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, http.StatusOK, key)
+}
+
 // GET /admin/stats
 func (h *AdminHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.logRepo.Stats(r.Context())
@@ -195,6 +257,100 @@ func (h *AdminHandler) PutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GET /admin/providers
+func (h *AdminHandler) ListProviders(w http.ResponseWriter, r *http.Request) {
+	providers, err := h.providerRepo.List(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, http.StatusOK, providers)
+}
+
+// POST /admin/providers
+func (h *AdminHandler) CreateProvider(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string  `json:"name"`
+		BaseURL   string  `json:"base_url"`
+		APIKey    string  `json:"api_key"`
+		IsDefault bool    `json:"is_default"`
+		Note      *string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		jsonError(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if req.BaseURL == "" {
+		jsonError(w, "base_url is required", http.StatusBadRequest)
+		return
+	}
+	p, err := h.providerRepo.Create(r.Context(), repository.CreateProviderInput{
+		Name:      req.Name,
+		BaseURL:   req.BaseURL,
+		APIKey:    req.APIKey,
+		IsDefault: req.IsDefault,
+		Note:      req.Note,
+	})
+	if err != nil {
+		jsonError(w, "failed to create provider: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.invalidateProviderCache()
+	jsonOK(w, http.StatusCreated, p)
+}
+
+// PATCH /admin/providers/{id}
+func (h *AdminHandler) UpdateProvider(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Name      *string `json:"name"`
+		BaseURL   *string `json:"base_url"`
+		APIKey    *string `json:"api_key"`
+		IsActive  *bool   `json:"is_active"`
+		IsDefault *bool   `json:"is_default"`
+		Note      *string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	p, err := h.providerRepo.Update(r.Context(), id, repository.UpdateProviderInput{
+		Name:      req.Name,
+		BaseURL:   req.BaseURL,
+		APIKey:    req.APIKey,
+		IsActive:  req.IsActive,
+		IsDefault: req.IsDefault,
+		Note:      req.Note,
+	})
+	if err != nil {
+		jsonError(w, "failed to update provider: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.invalidateProviderCache()
+	jsonOK(w, http.StatusOK, p)
+}
+
+// DELETE /admin/providers/{id}
+func (h *AdminHandler) DeleteProvider(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.providerRepo.Delete(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.invalidateProviderCache()
+	jsonOK(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *AdminHandler) invalidateProviderCache() {
+	if h.rdb != nil {
+		h.rdb.Del(context.Background(), "provider:default:base_url", "provider:default:api_key")
+	}
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
