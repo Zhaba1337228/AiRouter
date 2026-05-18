@@ -146,17 +146,21 @@ if [ -z "$OPT_UPSTREAM_KEY" ]; then
 fi
 
 #──────────────────────────────────────────────────────────────────────────────
-# Determine ports
+# Determine ports (interactive prompts if not set via flags)
 #──────────────────────────────────────────────────────────────────────────────
 if [ -z "$OPT_PORT" ]; then
-    OPT_PORT=$(pick_free_port)
+    _suggested_backend=$(pick_free_port)
+    read -rp "  Backend port  [${_suggested_backend}]: " _input_backend
+    OPT_PORT="${_input_backend:-${_suggested_backend}}"
 fi
+
 if [ -z "$OPT_FRONTEND_PORT" ]; then
-    OPT_FRONTEND_PORT=$(pick_free_port)
-    # Make sure it's different from backend port
-    while [ "$OPT_FRONTEND_PORT" = "$OPT_PORT" ]; do
-        OPT_FRONTEND_PORT=$(pick_free_port)
+    _suggested_frontend=$(pick_free_port)
+    while [ "$_suggested_frontend" = "$OPT_PORT" ]; do
+        _suggested_frontend=$(pick_free_port)
     done
+    read -rp "  Frontend port [${_suggested_frontend}]: " _input_frontend
+    OPT_FRONTEND_PORT="${_input_frontend:-${_suggested_frontend}}"
 fi
 
 #──────────────────────────────────────────────────────────────────────────────
