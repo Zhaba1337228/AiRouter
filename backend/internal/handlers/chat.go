@@ -2,35 +2,79 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/airouter/backend/internal/repository"
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	chatProviderCacheKeyBaseURL = "provider:default:base_url"
+	chatProviderCacheKeyAPIKey  = "provider:default:api_key"
+	chatProviderCacheTTL        = 15 * time.Second
 )
 
 type ChatHandler struct {
-	upstreamBaseURL string
-	upstreamAPIKey  string
-	httpClient      *http.Client
+	envBaseURL   string // fallback from env
+	envAPIKey    string // fallback from env
+	providerRepo *repository.ProviderRepo
+	rdb          *redis.Client
+	httpClient   *http.Client
 }
 
-func NewChatHandler(upstreamBaseURL, upstreamAPIKey string) *ChatHandler {
+func NewChatHandler(
+	upstreamBaseURL, upstreamAPIKey string,
+	providerRepo *repository.ProviderRepo,
+	rdb *redis.Client,
+) *ChatHandler {
 	return &ChatHandler{
-		upstreamBaseURL: strings.TrimRight(upstreamBaseURL, "/"),
-		upstreamAPIKey:  upstreamAPIKey,
-		httpClient:      &http.Client{Timeout: 120 * time.Second},
+		envBaseURL:   strings.TrimRight(upstreamBaseURL, "/"),
+		envAPIKey:    upstreamAPIKey,
+		providerRepo: providerRepo,
+		rdb:          rdb,
+		httpClient:   &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+// activeProvider returns the base URL and API key to use for the current request.
+// Priority: Redis cache → DB default provider → env fallback.
+// Mirrors proxy.Handler.activeProvider so /admin/chat sees the same provider
+// as the user-facing /v1 proxy.
+func (h *ChatHandler) activeProvider(ctx context.Context) (baseURL, apiKey string) {
+	if h.rdb != nil {
+		cachedURL, errU := h.rdb.Get(ctx, chatProviderCacheKeyBaseURL).Result()
+		cachedKey, errK := h.rdb.Get(ctx, chatProviderCacheKeyAPIKey).Result()
+		if errU == nil && errK == nil && cachedURL != "" {
+			return strings.TrimRight(cachedURL, "/"), cachedKey
+		}
+	}
+	if h.providerRepo != nil {
+		if p, err := h.providerRepo.GetDefault(ctx); err == nil {
+			if h.rdb != nil {
+				h.rdb.SetEx(ctx, chatProviderCacheKeyBaseURL, p.BaseURL, chatProviderCacheTTL)
+				h.rdb.SetEx(ctx, chatProviderCacheKeyAPIKey, p.APIKey, chatProviderCacheTTL)
+			}
+			return strings.TrimRight(p.BaseURL, "/"), p.APIKey
+		}
+	}
+	return h.envBaseURL, h.envAPIKey
 }
 
 // GET /admin/models — fetch model list from upstream
 func (h *ChatHandler) ListModels(w http.ResponseWriter, r *http.Request) {
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.upstreamBaseURL+"/v1/models", nil)
+	baseURL, apiKey := h.activeProvider(r.Context())
+
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"/v1/models", nil)
 	if err != nil {
 		jsonError(w, "failed to build upstream request", http.StatusInternalServerError)
 		return
 	}
-	upReq.Header.Set("Authorization", "Bearer "+h.upstreamAPIKey)
+	upReq.Header.Set("Authorization", "Bearer "+apiKey)
 	upReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.httpClient.Do(upReq)
@@ -88,6 +132,8 @@ func fallbackModels() map[string][]string {
 
 // POST /admin/chat — proxies to /v1/chat/completions with streaming support
 func (h *ChatHandler) Chat(w http.ResponseWriter, r *http.Request) {
+	baseURL, apiKey := h.activeProvider(r.Context())
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		jsonError(w, "failed to read body", http.StatusBadRequest)
@@ -109,12 +155,12 @@ func (h *ChatHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		h.upstreamBaseURL+"/v1/chat/completions", bytes.NewReader(body))
+		baseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, "failed to build request", http.StatusInternalServerError)
 		return
 	}
-	upReq.Header.Set("Authorization", "Bearer "+h.upstreamAPIKey)
+	upReq.Header.Set("Authorization", "Bearer "+apiKey)
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Accept", "text/event-stream")
 

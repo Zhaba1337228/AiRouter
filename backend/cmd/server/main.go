@@ -72,7 +72,7 @@ func main() {
 
 	// Handlers
 	adminHandler := handlers.NewAdminHandler(keyRepo, logRepo, settingsRepo, providerRepo, rdb)
-	chatHandler  := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey)
+	chatHandler  := handlers.NewChatHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, providerRepo, rdb)
 	proxyHandler := proxy.NewHandler(cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, logRepo, settingsRepo, providerRepo, rdb)
 
 	// Router
