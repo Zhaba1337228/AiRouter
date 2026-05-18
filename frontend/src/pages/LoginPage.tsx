@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { client } from '../api/client'
+import { client, adminBase } from '../api/client'
 
 export default function LoginPage() {
   const { login } = useAuth()
@@ -16,7 +16,7 @@ export default function LoginPage() {
     setLoading(true)
     try {
       // Verify the token by hitting a protected endpoint
-      await client.get('/admin/stats', {
+      await client.get(`${adminBase}/stats`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       login(token)
