@@ -71,6 +71,12 @@ services:
         VITE_APP_BASE: /${ADMIN_PATH:-admin}
     container_name: airouter_frontend
     restart: unless-stopped
+    environment:
+      # Runtime env — substituted into nginx.conf at container startup.
+      # No frontend rebuild needed when only ADMIN_PATH on the nginx side changes
+      # (the JS bundle still needs rebuild because VITE_* are baked in).
+      APP_BASE: /${ADMIN_PATH:-admin}
+      NGINX_ENVSUBST_FILTER: APP_BASE
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     networks:

@@ -5,8 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
-# Declare build args BEFORE COPY so Docker doesn't cache the build step
-# when these values change
+# Build args (baked into the JS bundle)
 ARG VITE_API_URL=http://localhost:8200
 ARG VITE_ADMIN_PATH=admin
 ARG VITE_APP_BASE=/admin
@@ -22,14 +21,15 @@ RUN echo "VITE_API_URL=${VITE_API_URL}" > .env && \
 
 FROM nginx:1.27-alpine
 
-ARG VITE_APP_BASE=/admin
-
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Replace __APP_BASE__ placeholder in nginx config with the actual path
-RUN sed -i "s|__APP_BASE__|${VITE_APP_BASE}|g" /etc/nginx/conf.d/default.conf
+# nginx.conf is processed by the official image's envsubst entrypoint at
+# CONTAINER STARTUP (not build time). This avoids any Docker build-cache
+# issues when ADMIN_PATH changes — just `docker compose up -d` is enough.
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+# Only substitute ${APP_BASE}; leave nginx variables like $uri untouched
+ENV NGINX_ENVSUBST_FILTER=APP_BASE
+ENV APP_BASE=/admin
 
 EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]
