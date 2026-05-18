@@ -266,6 +266,10 @@ func (h *AdminHandler) ListProviders(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Always return [] (not null) so the frontend can safely call .map/.length
+	if providers == nil {
+		providers = []repository.Provider{}
+	}
 	jsonOK(w, http.StatusOK, providers)
 }
 

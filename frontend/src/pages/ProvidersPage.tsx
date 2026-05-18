@@ -102,10 +102,12 @@ export default function ProvidersPage() {
   const [editForm, setEditForm] = useState<FormState>(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
-  const { data: list = [], isLoading } = useQuery<Provider[]>({
+  const { data, isLoading } = useQuery<Provider[]>({
     queryKey: ['providers'],
     queryFn: providers.list,
   })
+  // Backend may return null for empty list — coerce to []
+  const list: Provider[] = Array.isArray(data) ? data : []
 
   const createMutation = useMutation({
     mutationFn: providers.create,
