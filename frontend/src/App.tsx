@@ -42,11 +42,13 @@ function AppRoutes() {
   )
 }
 
+const APP_BASE = import.meta.env.VITE_APP_BASE || '/admin'
+
 export default function App() {
   return (
     <QueryClientProvider client={qc}>
       <AuthProvider>
-        <BrowserRouter>
+        <BrowserRouter basename={APP_BASE}>
           <AppRoutes />
         </BrowserRouter>
       </AuthProvider>

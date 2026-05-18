@@ -68,6 +68,7 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8200}
         VITE_ADMIN_PATH: ${ADMIN_PATH:-admin}
+        VITE_APP_BASE: /${ADMIN_PATH:-admin}
     container_name: airouter_frontend
     restart: unless-stopped
     ports:
