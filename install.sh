@@ -216,7 +216,7 @@ echo -e "${BOLD}┌────────────────────�
 echo -e "${BOLD}│           Installation Summary              │${RESET}"
 echo -e "${BOLD}└─────────────────────────────────────────────┘${RESET}"
 echo ""
-echo -e "  ${BOLD}Admin Panel URL:${RESET}   ${GREEN}http://${SERVER_HOST}:${OPT_FRONTEND_PORT}${RESET}"
+echo -e "  ${BOLD}Admin Panel URL:${RESET}   ${GREEN}http://${SERVER_HOST}:${OPT_FRONTEND_PORT}/${ADMIN_PATH}${RESET}   (keep secret!)"
 echo -e "  ${BOLD}Backend API URL:${RESET}   ${CYAN}http://${SERVER_HOST}:${OPT_PORT}${RESET}"
 echo -e "  ${BOLD}Admin API path:${RESET}    ${YELLOW}/${ADMIN_PATH}/...${RESET}   (keep secret!)"
 echo ""
@@ -233,7 +233,7 @@ cat > "$CREDS_FILE" << EOF
 # AiRouter credentials — generated $(date -u '+%Y-%m-%d %H:%M UTC')
 # Keep this file SECRET and out of version control.
 
-Admin Panel:   http://${SERVER_HOST}:${OPT_FRONTEND_PORT}
+Admin Panel:   http://${SERVER_HOST}:${OPT_FRONTEND_PORT}/${ADMIN_PATH}
 Backend API:   http://${SERVER_HOST}:${OPT_PORT}
 Admin path:    /${ADMIN_PATH}
 
@@ -269,7 +269,7 @@ $DC up -d --build
 echo ""
 success "AiRouter is running!"
 echo ""
-echo -e "  ${BOLD}Open the panel:${RESET}  ${GREEN}http://${SERVER_HOST}:${OPT_FRONTEND_PORT}${RESET}"
+echo -e "  ${BOLD}Open the panel:${RESET}  ${GREEN}http://${SERVER_HOST}:${OPT_FRONTEND_PORT}/${ADMIN_PATH}${RESET}"
 echo -e "  ${BOLD}Login token:${RESET}     ${YELLOW}${ADMIN_TOKEN}${RESET}"
 echo ""
 echo -e "  ${BOLD}Logs:${RESET}  $DC logs -f backend"

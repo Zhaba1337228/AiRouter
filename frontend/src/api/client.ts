@@ -20,12 +20,14 @@ client.interceptors.request.use((config) => {
   return config
 })
 
+const APP_BASE = (import.meta.env.VITE_APP_BASE || '').replace(/\/+$/, '')
+
 client.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
       localStorage.removeItem('admin_token')
-      window.location.href = '/login'
+      window.location.href = `${APP_BASE}/login`
     }
     return Promise.reject(err)
   }
