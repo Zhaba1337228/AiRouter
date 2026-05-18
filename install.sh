@@ -3,6 +3,8 @@
 # Usage: bash install.sh [OPTIONS]
 #
 # Options:
+#   --host HOST          Public host/IP the browser uses to reach the backend
+#                        (default: auto-detected public IP, or 'localhost')
 #   --port PORT          Backend port (default: random 10000-60000)
 #   --frontend-port PORT Frontend port (default: random 10000-60000)
 #   --upstream-url URL   Upstream AI API base URL (required)
@@ -81,6 +83,7 @@ OPT_PORT=""
 OPT_FRONTEND_PORT=""
 OPT_UPSTREAM_URL=""
 OPT_UPSTREAM_KEY=""
+OPT_HOST=""
 OPT_NO_START=0
 OPT_FORCE=0
 
@@ -90,10 +93,11 @@ while [[ $# -gt 0 ]]; do
         --frontend-port)   OPT_FRONTEND_PORT="$2";  shift 2 ;;
         --upstream-url)    OPT_UPSTREAM_URL="$2";   shift 2 ;;
         --upstream-key)    OPT_UPSTREAM_KEY="$2";   shift 2 ;;
+        --host)            OPT_HOST="$2";           shift 2 ;;
         --no-start)        OPT_NO_START=1;          shift ;;
         --force)           OPT_FORCE=1;             shift ;;
         -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \?//'
+            sed -n '2,15p' "$0" | sed 's/^# \?//'
             exit 0
             ;;
         *) warn "Unknown option: $1"; shift ;;
@@ -136,6 +140,37 @@ echo -e "${BOLD}       AiRouter — Quick Installer      ${RESET}"
 echo -e "${BOLD}═══════════════════════════════════════${RESET}"
 echo ""
 
+#──────────────────────────────────────────────────────────────────────────────
+# Detect server hostname/IP — this is what the browser will use to reach
+# the backend (VITE_API_URL is baked into the JS bundle at build time).
+#──────────────────────────────────────────────────────────────────────────────
+detect_public_ip() {
+    local ip=""
+    # Try public IP detection services
+    for url in "https://api.ipify.org" "https://ifconfig.me" "https://ipinfo.io/ip"; do
+        ip=$(curl -fsS --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+    # Fallback: first non-loopback IPv4
+    if command -v hostname &>/dev/null; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [ -n "$ip" ] && echo "$ip" && return
+    fi
+    echo "localhost"
+}
+
+if [ -z "$OPT_HOST" ]; then
+    _suggested_host=$(detect_public_ip)
+    echo ""
+    info "Server host/IP — used by the browser to call the backend API."
+    info "Should be the public IP or domain that you'll open the panel from."
+    read -rp "  Server host/IP [${_suggested_host}]: " _input_host
+    OPT_HOST="${_input_host:-${_suggested_host}}"
+fi
+
 if [ -z "$OPT_UPSTREAM_URL" ]; then
     read -rp "  Upstream AI API base URL  (Enter to skip, configure later via Providers): " OPT_UPSTREAM_URL
 fi
@@ -172,7 +207,7 @@ DB_USER="airouter"
 DB_NAME="airouter"
 ADMIN_TOKEN=$(gen_secret)
 ADMIN_PATH=$(gen_path)
-SERVER_HOST="${SERVER_HOST:-localhost}"
+SERVER_HOST="$OPT_HOST"
 
 # VITE_API_URL — what the browser uses to reach the backend
 VITE_API_URL="http://${SERVER_HOST}:${OPT_PORT}"
