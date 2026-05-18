@@ -5,7 +5,7 @@ import {
   Send, Square, Trash2, Copy, Check, ChevronDown, ChevronUp,
   Bot, User, Zap, Sparkles, Paperclip, X, FileText,
 } from 'lucide-react'
-import { client } from '../api/client'
+import { client, adminBase } from '../api/client'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8200'
 
@@ -122,7 +122,7 @@ export default function ChatPage() {
 
   const { data: modelData, isLoading: loadingModels } = useQuery({
     queryKey: ['admin-models'],
-    queryFn: () => client.get('/admin/models').then(r => r.data),
+    queryFn: () => client.get(`${adminBase}/models`).then(r => r.data),
     staleTime: 60_000,
   })
 
@@ -220,7 +220,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, { role: 'assistant', content: '' }])
 
     try {
-      const resp = await fetch(`${API_URL}/admin/chat`, {
+      const resp = await fetch(`${API_URL}${adminBase}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -11,8 +11,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # No ports exposed — only reachable inside the internal network
+    networks:
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airouter}"]
       interval: 5s
@@ -26,8 +27,9 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
+    # No ports exposed — only reachable inside the internal network
+    networks:
+      - internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -43,12 +45,16 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-airouter}:${POSTGRES_PASSWORD:-secret}@postgres:5432/${POSTGRES_DB:-airouter}?sslmode=disable
       REDIS_URL: redis://redis:6379
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme-super-secret-token}
-      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://www.xynera.vip}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      ADMIN_PATH: ${ADMIN_PATH:-admin}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://api.ecomagent.in}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY}
-      PORT: 8200
+      PORT: ${PORT:-8200}
     ports:
-      - "8200:8200"
+      - "${PORT:-8200}:${PORT:-8200}"
+    networks:
+      - internal
+      - public
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,12 +67,20 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8200}
+        VITE_ADMIN_PATH: ${ADMIN_PATH:-admin}
     container_name: airouter_frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
+    networks:
+      - public
     depends_on:
       - backend
+
+networks:
+  internal:
+    internal: true
+  public: {}
 
 volumes:
   postgres_data:

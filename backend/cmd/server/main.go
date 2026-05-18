@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -111,31 +112,35 @@ func main() {
 		w.Write(data)
 	}
 
-	// Admin routes (protected by admin token)
-	r.Route("/admin", func(r chi.Router) {
-		r.Use(mw.AdminAuth(cfg.AdminToken))
+	// Admin routes (protected by admin token, mounted at configurable secret path)
+	adminPath := "/" + strings.TrimPrefix(strings.TrimSuffix(cfg.AdminPath, "/"), "/")
+	log.Printf("admin API mounted at %s", adminPath)
 
-		r.Get("/keys", adminHandler.ListKeys)
-		r.Post("/keys", adminHandler.CreateKey)
-		r.Patch("/keys/{id}", adminHandler.UpdateKey)
-		r.Delete("/keys/{id}", adminHandler.DeleteKey)
-		r.Patch("/keys/{id}/toggle", adminHandler.ToggleKey)
+	adminRouter := chi.NewRouter()
+	adminRouter.Use(mw.AdminAuth(cfg.AdminToken))
 
-		r.Get("/stats", adminHandler.Stats)
-		r.Get("/stats/daily", adminHandler.StatsByDay)
-		r.Get("/logs", adminHandler.Logs)
+	adminRouter.Get("/keys", adminHandler.ListKeys)
+	adminRouter.Post("/keys", adminHandler.CreateKey)
+	adminRouter.Patch("/keys/{id}", adminHandler.UpdateKey)
+	adminRouter.Delete("/keys/{id}", adminHandler.DeleteKey)
+	adminRouter.Patch("/keys/{id}/toggle", adminHandler.ToggleKey)
 
-		r.Get("/models", chatHandler.ListModels)
-		r.Post("/chat", chatHandler.Chat)
+	adminRouter.Get("/stats", adminHandler.Stats)
+	adminRouter.Get("/stats/daily", adminHandler.StatsByDay)
+	adminRouter.Get("/logs", adminHandler.Logs)
 
-		r.Get("/settings", adminHandler.GetSettings)
-		r.Put("/settings", adminHandler.PutSettings)
+	adminRouter.Get("/models", chatHandler.ListModels)
+	adminRouter.Post("/chat", chatHandler.Chat)
 
-		r.Get("/providers", adminHandler.ListProviders)
-		r.Post("/providers", adminHandler.CreateProvider)
-		r.Patch("/providers/{id}", adminHandler.UpdateProvider)
-		r.Delete("/providers/{id}", adminHandler.DeleteProvider)
-	})
+	adminRouter.Get("/settings", adminHandler.GetSettings)
+	adminRouter.Put("/settings", adminHandler.PutSettings)
+
+	adminRouter.Get("/providers", adminHandler.ListProviders)
+	adminRouter.Post("/providers", adminHandler.CreateProvider)
+	adminRouter.Patch("/providers/{id}", adminHandler.UpdateProvider)
+	adminRouter.Delete("/providers/{id}", adminHandler.DeleteProvider)
+
+	r.Mount(adminPath, adminRouter)
 
 	// Proxy routes (protected by user API key)
 	proxyRouter := chi.NewRouter()

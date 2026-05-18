@@ -8,7 +8,8 @@ RUN npm install
 COPY . .
 
 ARG VITE_API_URL=http://localhost:8200
-RUN echo "VITE_API_URL=${VITE_API_URL}" > .env && npm run build
+ARG VITE_ADMIN_PATH=admin
+RUN echo "VITE_API_URL=${VITE_API_URL}" > .env && echo "VITE_ADMIN_PATH=${VITE_ADMIN_PATH}" >> .env && npm run build
 
 # ---
 

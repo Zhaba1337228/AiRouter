@@ -2,6 +2,9 @@
 .env
 .env.local
 
+# Generated credentials file (contains secrets)
+.airouter_credentials
+
 # Go
 backend/bin/
 backend/*.exe
