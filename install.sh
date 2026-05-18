@@ -137,12 +137,11 @@ echo -e "${BOLD}═════════════════════�
 echo ""
 
 if [ -z "$OPT_UPSTREAM_URL" ]; then
-    read -rp "  Upstream AI API base URL  [https://api.ecomagent.in]: " OPT_UPSTREAM_URL
-    OPT_UPSTREAM_URL="${OPT_UPSTREAM_URL:-https://api.ecomagent.in}"
+    read -rp "  Upstream AI API base URL  (Enter to skip, configure later via Providers): " OPT_UPSTREAM_URL
 fi
 
 if [ -z "$OPT_UPSTREAM_KEY" ]; then
-    read -rp "  Upstream AI API key (leave empty to configure later): " OPT_UPSTREAM_KEY
+    read -rp "  Upstream AI API key       (Enter to skip, configure later via Providers): " OPT_UPSTREAM_KEY
 fi
 
 #──────────────────────────────────────────────────────────────────────────────
