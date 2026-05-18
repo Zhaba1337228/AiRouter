@@ -124,28 +124,16 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward all client headers except hop-by-hop, auth (replaced below), and
-	// Anthropic-Beta values that advertise extended-thinking support — the upstream
-	// (xynera) does not implement the thinking API and returns an empty 400 when
-	// those beta flags are present.
+	// Forward all client headers except hop-by-hop and auth (which we replace).
+	// This preserves Anthropic-Beta (multi-value, incl. interleaved-thinking),
+	// MCP headers, and any future SDK headers without needing an explicit whitelist.
+	// openlimits.app supports extended thinking natively.
 	for k, vv := range r.Header {
 		switch k {
 		case "Authorization", "X-Api-Key", "X-API-Key",
 			"Connection", "Keep-Alive", "Proxy-Authenticate",
 			"Proxy-Authorization", "Te", "Trailers",
 			"Transfer-Encoding", "Upgrade", "Content-Length":
-			continue
-		case "Anthropic-Beta":
-			// Strip thinking-related betas; forward everything else.
-			var kept []string
-			for _, v := range vv {
-				if !isThinkingBeta(v) {
-					kept = append(kept, v)
-				}
-			}
-			for _, v := range kept {
-				upReq.Header.Add(k, v)
-			}
 			continue
 		}
 		for _, v := range vv {
@@ -243,13 +231,6 @@ func rewriteRequest(body []byte, mode CompressionMode) []byte {
 		}
 	}
 
-	// Strip the Anthropic extended-thinking parameter — the upstream (xynera)
-	// does not support it and returns an empty 400 Bad Request when present.
-	if _, ok := payload["thinking"]; ok {
-		delete(payload, "thinking")
-		changed = true
-	}
-
 	if changed {
 		if b, err := json.Marshal(payload); err == nil {
 			body = b
@@ -258,12 +239,6 @@ func rewriteRequest(body []byte, mode CompressionMode) []byte {
 
 	// Compress context with active mode
 	return CompressBody(body, mode)
-}
-
-// isThinkingBeta reports whether an Anthropic-Beta header value relates to
-// extended thinking (e.g. "interleaved-thinking-2025-05-14").
-func isThinkingBeta(v string) bool {
-	return strings.Contains(v, "thinking") || strings.Contains(v, "extended-thinking")
 }
 
 // isStreamRequest checks if the request body asks for streaming
