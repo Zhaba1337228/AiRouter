@@ -104,7 +104,14 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 
 	upstreamURL := h.upstreamBaseURL + r.URL.Path
 	if r.URL.RawQuery != "" {
-		upstreamURL += "?" + r.URL.RawQuery
+		// Strip Anthropic SDK-specific query params that upstreams don't support.
+		// e.g. ?beta=true is appended by Claude Code to signal beta feature use;
+		// xynera returns an empty 400 when it receives unknown query parameters.
+		q := r.URL.Query()
+		q.Del("beta")
+		if encoded := q.Encode(); encoded != "" {
+			upstreamURL += "?" + encoded
+		}
 	}
 
 	// Rewrite body: route model + compress context
@@ -168,9 +175,12 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Detect streaming response
-	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
-		isStreamRequest(body)
+	// Detect streaming response — only enter SSE path for successful responses.
+	// Error responses (4xx/5xx) are always handled as plain JSON so they get
+	// logged and forwarded with their body intact.
+	isSSE := resp.StatusCode < 300 && (
+		strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
+		isStreamRequest(body))
 
 	if isSSE {
 		w.Header().Set("Content-Type", "text/event-stream")
