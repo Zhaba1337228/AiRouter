@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { providers, Provider } from '../api/client'
+import { providers } from '../api/client'
+import type { Provider } from '../api/client'
 
 type FormState = {
   name: string
