@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -116,15 +117,28 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward all client headers except hop-by-hop and auth (which we replace).
-	// This preserves Anthropic-Beta (multi-value), MCP headers, extended-thinking
-	// flags, and any future SDK headers without needing an explicit whitelist.
+	// Forward all client headers except hop-by-hop, auth (replaced below), and
+	// Anthropic-Beta values that advertise extended-thinking support — the upstream
+	// (xynera) does not implement the thinking API and returns an empty 400 when
+	// those beta flags are present.
 	for k, vv := range r.Header {
 		switch k {
 		case "Authorization", "X-Api-Key", "X-API-Key",
 			"Connection", "Keep-Alive", "Proxy-Authenticate",
 			"Proxy-Authorization", "Te", "Trailers",
 			"Transfer-Encoding", "Upgrade", "Content-Length":
+			continue
+		case "Anthropic-Beta":
+			// Strip thinking-related betas; forward everything else.
+			var kept []string
+			for _, v := range vv {
+				if !isThinkingBeta(v) {
+					kept = append(kept, v)
+				}
+			}
+			for _, v := range kept {
+				upReq.Header.Add(k, v)
+			}
 			continue
 		}
 		for _, v := range vv {
@@ -179,6 +193,10 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to read upstream response"}`, http.StatusBadGateway)
 		return
 	}
+	if resp.StatusCode >= 400 {
+		log.Printf("upstream error %d for %s %s — body: %s",
+			resp.StatusCode, r.Method, r.URL.Path, truncateLog(respBody, 512))
+	}
 	converted := ConvertResponse(respBody)
 	if len(converted) != len(respBody) {
 		// Body was rewritten — fix Content-Length so chunked clients don't truncate.
@@ -189,7 +207,8 @@ func (h *Handler) Proxy(w http.ResponseWriter, r *http.Request) {
 	h.asyncLog(r, body, converted, resp.StatusCode, latencyMs, nil)
 }
 
-// rewriteRequest applies model routing then context compression.
+// rewriteRequest applies model routing, strips unsupported params, then
+// applies context compression.
 func rewriteRequest(body []byte, mode CompressionMode) []byte {
 	if len(body) == 0 {
 		return body
@@ -214,6 +233,13 @@ func rewriteRequest(body []byte, mode CompressionMode) []byte {
 		}
 	}
 
+	// Strip the Anthropic extended-thinking parameter — the upstream (xynera)
+	// does not support it and returns an empty 400 Bad Request when present.
+	if _, ok := payload["thinking"]; ok {
+		delete(payload, "thinking")
+		changed = true
+	}
+
 	if changed {
 		if b, err := json.Marshal(payload); err == nil {
 			body = b
@@ -222,6 +248,12 @@ func rewriteRequest(body []byte, mode CompressionMode) []byte {
 
 	// Compress context with active mode
 	return CompressBody(body, mode)
+}
+
+// isThinkingBeta reports whether an Anthropic-Beta header value relates to
+// extended thinking (e.g. "interleaved-thinking-2025-05-14").
+func isThinkingBeta(v string) bool {
+	return strings.Contains(v, "thinking") || strings.Contains(v, "extended-thinking")
 }
 
 // isStreamRequest checks if the request body asks for streaming
@@ -463,6 +495,17 @@ func tryExtractSSE(body []byte, log *models.RequestLog) {
 		log.TotalTokens = promptTokens + completionTokens
 		log.CostUSD = float64(log.TotalTokens) / 1_000_000 * models.TokenPricePerMillion
 	}
+}
+
+// truncateLog returns at most maxBytes of body as a string, appending "…" if trimmed.
+func truncateLog(b []byte, maxBytes int) string {
+	if len(b) == 0 {
+		return "(empty)"
+	}
+	if len(b) <= maxBytes {
+		return string(b)
+	}
+	return string(b[:maxBytes]) + "…"
 }
 
 // largestIntField finds occurrences of `"<field>": <int>` in `body` and returns

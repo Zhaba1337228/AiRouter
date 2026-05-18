@@ -133,8 +133,8 @@ func main() {
 		Addr:              addr,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      130 * time.Second,
+		ReadTimeout:       0, // no limit — large Claude Code contexts can be many MB
+		WriteTimeout:      0, // no limit — streaming responses can take minutes
 		IdleTimeout:       120 * time.Second,
 	}
 

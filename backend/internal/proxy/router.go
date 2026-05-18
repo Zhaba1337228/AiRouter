@@ -47,14 +47,19 @@ var modelRoutes = map[string]string{
 
 	"claude-sonnet-4-5":              "claude-4-5-sonnet",
 	"claude-4-5-sonnet":              "claude-4-5-sonnet",
-	"claude-4-6-sonnet":              "claude-4-6-sonnet",
 	"claude-3-5-sonnet-20241022":     "claude-4-5-sonnet",
 	"claude-3-5-sonnet-20240620":     "claude-4-5-sonnet",
 	"claude-3-5-sonnet-latest":       "claude-4-5-sonnet",
 	"claude-3-7-sonnet-20250219":     "claude-4-5-sonnet",
 	"claude-3-7-sonnet-latest":       "claude-4-5-sonnet",
 	"claude-3-sonnet-20240229":       "claude-4-5-sonnet",
-	"claude-sonnet-latest":           "claude-4-5-sonnet",
+
+	// 4.6 Sonnet variants (including thinking models used by Claude Code)
+	"claude-sonnet-4-6":              "claude-4-6-sonnet",
+	"claude-4-6-sonnet":              "claude-4-6-sonnet",
+	"claude-sonnet-4-6-thinking-1m":  "claude-4-6-sonnet",
+	"claude-sonnet-4-6-thinking":     "claude-4-6-sonnet",
+	"claude-sonnet-latest":           "claude-4-6-sonnet",
 
 	"claude-haiku-4-5":               "claude-4-5-haiku",
 	"claude-4-5-haiku":               "claude-4-5-haiku",
@@ -95,12 +100,16 @@ func RouteModel(model string) string {
 		switch {
 		case strings.Contains(lower, "opus"):
 			return "claude-opus-4-7"
-		case strings.Contains(lower, "sonnet"):
-			return "claude-4-5-sonnet"
 		case strings.Contains(lower, "haiku"):
 			return "claude-4-5-haiku"
+		case strings.Contains(lower, "sonnet"):
+			// Route any unrecognised Sonnet variant to the latest generation
+			if strings.Contains(lower, "4-5") {
+				return "claude-4-5-sonnet"
+			}
+			return "claude-4-6-sonnet"
 		default:
-			return "claude-4-5-sonnet" // default Claude → Sonnet
+			return "claude-4-6-sonnet" // default Claude → latest Sonnet
 		}
 	}
 
